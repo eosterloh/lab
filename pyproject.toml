@@ -1,0 +1,21 @@
+[project]
+name = "lab"
+version = "0.1.0"
+description = "Eval → Research → Train harness for local model experiments."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+lab = "lab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lab*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
