@@ -7,7 +7,7 @@ from typing import Any
 import json
 
 MAX_TRAIN_HOURS = 3.5
-TRAINERS = frozenset({"dummy", "tinytrain"})
+TRAINERS = frozenset({"dummy", "tinytrain", "lab"})
 
 
 @dataclass
@@ -52,6 +52,11 @@ class ArtifactPack:
         self.budgets.validate()
         if self.trainer == "tinytrain" and not self.config.get("command"):
             raise ValueError("tinytrain packs require config.command (argv list)")
+        if self.trainer == "lab":
+            hidden = int(self.config.get("hidden", 32))
+            heads = int(self.config.get("heads", 1))
+            if heads < 1 or hidden % heads != 0:
+                raise ValueError("lab config: hidden must be divisible by heads")
 
     def canonical(self) -> dict[str, Any]:
         return {

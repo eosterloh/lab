@@ -36,8 +36,11 @@ ALWAYS_TOOLS = frozenset(
     {"read_notebook", "write_note", "write_beliefs", "halt"}
 )
 
+MEMORY_TOOLS = frozenset({"list_episodes", "read_episode", "read_hypothesis"})
+
 PHASE_TOOLS: dict[Phase, frozenset[str]] = {
     Phase.EVAL: ALWAYS_TOOLS
+    | MEMORY_TOOLS
     | {
         "run_eval",
         "read_metrics",
@@ -45,6 +48,7 @@ PHASE_TOOLS: dict[Phase, frozenset[str]] = {
         "enter_research",
     },
     Phase.RESEARCH: ALWAYS_TOOLS
+    | MEMORY_TOOLS
     | {
         "list_files",
         "read_file",
@@ -52,6 +56,8 @@ PHASE_TOOLS: dict[Phase, frozenset[str]] = {
         "exec",
         "web_fetch",
         "web_search",
+        "write_hypothesis",
+        "prefetch_data",
         "write_pack",
         "enter_train",
     },

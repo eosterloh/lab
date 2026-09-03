@@ -1,0 +1,18 @@
+{
+  "id": "core",
+  "version": 1,
+  "domain": "small-lm",
+  "primary": "confirm_ppl",
+  "higher_is_better": false,
+  "description": "Trainer loss/PPL, frozen holdout PPL (tune/confirm/ood), plus HellaSwag, ARC-Easy, PIQA.",
+  "lm": {
+    "tune": "lm_tune.jsonl",
+    "confirm": "lm_confirm.jsonl",
+    "ood": "lm_ood.jsonl"
+  },
+  "mc": {
+    "hellaswag": {"file": "hellaswag.jsonl", "chance": 0.25},
+    "arc_easy": {"file": "arc_easy.jsonl", "chance": 0.25},
+    "piqa": {"file": "piqa.jsonl", "chance": 0.5}
+  }
+}

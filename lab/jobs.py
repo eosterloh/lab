@@ -2,13 +2,30 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 import json
+import math
+import shutil
 import subprocess
+import sys
 import time
 
 from lab.config import LabConfig
+from lab.data_cache import materialize_sources
 from lab.pack import ArtifactPack
+from lab.train import BUILTIN_CORPUS, run_train_job
+
+
+def resolve_lab_parent(pack: ArtifactPack, cfg: LabConfig) -> Path | None:
+    for raw in (pack.parent_checkpoint, pack.config.get("checkpoint"), pack.config.get("parent")):
+        if not raw:
+            continue
+        path = Path(str(raw)).expanduser()
+        if path.is_file():
+            return path
+    ckpts = sorted(p for p in cfg.checkpoints_dir.glob("job-*.pt") if p.is_file())
+    return ckpts[-1] if ckpts else None
 
 
 def _now() -> str:
@@ -68,8 +85,11 @@ def dummy_metrics(pack: ArtifactPack) -> dict[str, Any]:
     if lr >= 1e-3:
         val_loss -= 0.02
     val_loss = max(0.4, round(val_loss, 4))
+    train_loss = round(val_loss + 0.04, 4)
     return {
+        "train_loss": train_loss,
         "val_loss": val_loss,
+        "val_ppl": round(math.exp(val_loss), 4),
         "steps": steps,
         "lr": lr,
         "tokens_seen": steps * 1024,
@@ -93,6 +113,9 @@ class JobManager:
         )
         job_dir = self.store._dir(job.id)
         job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "pack.json").write_text(
+            json.dumps(pack.canonical(), indent=2, sort_keys=True), encoding="utf-8"
+        )
         log_path = job_dir / "train.log"
         job.log_path = str(log_path)
 
@@ -108,6 +131,9 @@ class JobManager:
             job.ended_at = _now()
             self.store.save(job)
             return job
+
+        if pack.trainer == "lab":
+            return self._submit_lab(job, pack, job_dir, log_path)
 
         if pack.trainer == "tinytrain":
             root = self.cfg.tinytrain_root
@@ -137,6 +163,69 @@ class JobManager:
         job.ended_at = _now()
         self.store.save(job)
         return job
+
+    def _submit_lab(self, job: Job, pack: ArtifactPack, job_dir: Path, log_path: Path) -> Job:
+        sources = list((pack.data_manifest or {}).get("sources") or ["builtin:tiny"])
+        try:
+            materialize_sources(
+                sources,
+                self.cfg.data_cache_dir,
+                job_dir,
+                allow_network=self.cfg.allow_network,
+                frozen_eval_dir=self.cfg.frozen_eval_dir,
+            )
+        except Exception as e:
+            job.status = "failed"
+            job.error = f"materialize data: {e}"
+            job.ended_at = _now()
+            log_path.write_text(job.error + "\n", encoding="utf-8")
+            self.store.save(job)
+            return job
+        if any(s in {"builtin:tiny", "dummy://tinystories"} for s in sources):
+            shutil.copyfile(BUILTIN_CORPUS, job_dir / "corpus.txt")
+        parent = resolve_lab_parent(pack, self.cfg)
+        if parent is not None:
+            shutil.copy2(parent, job_dir / "parent.pt")
+        timeout_s = max(30.0, float(pack.budgets.max_hours) * 3600.0)
+        job.command = [sys.executable, "-m", "lab.train", "--job-dir", str(job_dir)]
+        try:
+            proc = run_train_job(job_dir, timeout_s=timeout_s)
+        except subprocess.TimeoutExpired:
+            job.status = "failed"
+            job.error = f"timeout after {timeout_s:.0f}s"
+            job.ended_at = _now()
+            self.store.save(job)
+            return job
+        job.ended_at = _now()
+        metrics_path = job_dir / "metrics.json"
+        if proc.returncode == 0 and metrics_path.is_file():
+            job.metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            job.status = "succeeded"
+            self._publish_checkpoint(job, job_dir)
+        else:
+            job.status = "failed"
+            tail = ""
+            if log_path.is_file():
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-800:]
+            job.error = f"exit {proc.returncode}" + (f": {tail.strip()}" if tail.strip() else "")
+        self.store.save(job)
+        return job
+
+    def _publish_checkpoint(self, job: Job, job_dir: Path) -> None:
+        src = job_dir / "checkpoint.pt"
+        if not src.is_file():
+            return
+        dest_dir = self.cfg.checkpoints_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{job.id}.pt"
+        shutil.copy2(src, dest)
+        shutil.copy2(src, dest_dir / "latest.pt")
+        if job.metrics is not None:
+            job.metrics["checkpoint"] = str(src)
+            job.metrics["run_checkpoint"] = str(dest)
+            (job_dir / "metrics.json").write_text(
+                json.dumps(job.metrics, indent=2, sort_keys=True), encoding="utf-8"
+            )
 
     def poll(self, job: Job) -> Job:
         if job.status in {"succeeded", "failed", "cancelled"}:

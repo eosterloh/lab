@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 import random
 
+from lab.data_cache import DEFAULT_MIX
+
 
 def dummy_pack(obs: dict[str, Any], extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
     cycle = int(obs.get("cycle") or 1)
@@ -14,10 +16,37 @@ def dummy_pack(obs: dict[str, Any], extra_config: dict[str, Any] | None = None) 
         "trainer": "dummy",
         "config": cfg,
         "data_manifest": {"sources": ["dummy://tinystories"], "unique_tokens": 0},
-        "eval_suite_id": "story",
-        "eval_suite_version": 0,
+        "eval_suite_id": "core",
+        "eval_suite_version": 1,
         "parent_checkpoint": str(obs.get("subject_checkpoint") or "subjects/tinytrain-8m"),
         "budgets": {"max_hours": 0.01, "max_steps": cfg["steps"]},
+    }
+
+
+def lab_pack(obs: dict[str, Any], extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cycle = int(obs.get("cycle") or 1)
+    cfg = {
+        "lr": 3e-3,
+        "steps": 4 + cycle,
+        "hidden": 32,
+        "layers": 1,
+        "heads": 1,
+        "seq_len": 32,
+        "batch": 4,
+    }
+    if extra_config:
+        cfg.update(extra_config)
+    return {
+        "hypothesis": f"cycle {cycle}: lab TinyGPT overtrain of subject {obs.get('subject_checkpoint')}",
+        "trainer": "lab",
+        "config": cfg,
+        "data_manifest": {"sources": list(DEFAULT_MIX), "unique_tokens": 0},
+        "eval_suite_id": "core",
+        "eval_suite_version": 1,
+        "parent_checkpoint": str(
+            obs.get("last_checkpoint") or obs.get("subject_checkpoint") or "subjects/tinytrain-8m"
+        ),
+        "budgets": {"max_hours": 0.05, "max_steps": cfg["steps"]},
     }
 
 
@@ -36,6 +65,14 @@ class DummyPolicy:
                 return "run_eval", {}
             return "enter_research", {}
         if phase == "research":
+            hyp = obs.get("hypothesis") or {}
+            if not str(hyp.get("claim") or "").strip():
+                cycle = int(obs.get("cycle") or 1)
+                return "write_hypothesis", {
+                    "claim": f"dummy overtrain of {obs.get('subject_checkpoint')} improves confirm_ppl (cycle {cycle})",
+                    "why": "smoke the Eval → Research → Train loop with the dummy trainer",
+                    "falsify": "dummy job fails or post-eval does not seal an episode",
+                }
             if self._pack_cycle != obs["cycle"]:
                 self._pack_cycle = obs["cycle"]
                 return "write_pack", {"pack": dummy_pack(obs)}
@@ -46,6 +83,35 @@ class DummyPolicy:
                 return "enter_eval", {}
             return "job_status", {}
         return "halt", {"reason": f"unknown phase {phase}"}
+
+
+class LabPolicy:
+    """Walks Eval → Research → Train with the in-repo TinyGPT trainer."""
+
+    def __init__(self) -> None:
+        self._pack_cycle: int | None = None
+
+    def act(self, obs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        dummy = DummyPolicy()
+        dummy._pack_cycle = self._pack_cycle
+        if obs.get("phase") == "research":
+            hyp = obs.get("hypothesis") or {}
+            if not str(hyp.get("claim") or "").strip():
+                cycle = int(obs.get("cycle") or 1)
+                return "write_hypothesis", {
+                    "claim": (
+                        f"lab TinyGPT overtrain of {obs.get('subject_checkpoint')} "
+                        f"improves confirm_ppl (cycle {cycle})"
+                    ),
+                    "why": "smoke the in-repo trainer under runs/<id>/jobs",
+                    "falsify": "lab job fails or post-eval does not seal an episode",
+                }
+            if self._pack_cycle != obs["cycle"]:
+                self._pack_cycle = obs["cycle"]
+                return "write_pack", {"pack": lab_pack(obs)}
+        name, args = dummy.act(obs)
+        self._pack_cycle = dummy._pack_cycle
+        return name, args
 
 
 SEARCH_SPACE: dict[str, list[Any]] = {
@@ -64,12 +130,16 @@ class ScriptedPolicy:
     def act(self, obs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         dummy = DummyPolicy()
         dummy._pack_cycle = self._pack_cycle
-        if obs.get("phase") == "research" and self._pack_cycle != obs["cycle"]:
-            self._pack_cycle = obs["cycle"]
-            cfg = {k: self.rng.choice(v) for k, v in SEARCH_SPACE.items()}
-            pack = dummy_pack(obs, extra_config=cfg)
-            pack["hypothesis"] = f"scripted random search {cfg}"
-            return "write_pack", {"pack": pack}
+        if obs.get("phase") == "research":
+            hyp = obs.get("hypothesis") or {}
+            if not str(hyp.get("claim") or "").strip():
+                return dummy.act(obs)
+            if self._pack_cycle != obs["cycle"]:
+                self._pack_cycle = obs["cycle"]
+                cfg = {k: self.rng.choice(v) for k, v in SEARCH_SPACE.items()}
+                pack = dummy_pack(obs, extra_config=cfg)
+                pack["hypothesis"] = f"scripted random search {cfg}"
+                return "write_pack", {"pack": pack}
         name, args = dummy.act(obs)
         self._pack_cycle = dummy._pack_cycle
         return name, args

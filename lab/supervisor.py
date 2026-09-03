@@ -1,32 +1,45 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
+from pathlib import Path
 import json
 import time
 
 from lab import actions
 from lab.config import LabConfig
+from lab.episodes import EpisodeStore
 from lab.evals import install_frozen_eval, run_eval
 from lab.gpu import GpuLock
 from lab.http import Transport
+from lab.hypothesis import HypothesisStore
 from lab.jobs import Job, JobManager
 from lab.notebook import Notebook
 from lab.pack import ArtifactPack, PackStore
 from lab.sandbox import Sandbox
+from lab.scorer import Scorer
 from lab.state import RunState
 from lab.types import PHASE_TOOLS, Phase, ToolResult, err, ok
+from lab.data_cache import list_cache
 
 
 class Supervisor:
-    def __init__(self, cfg: LabConfig, transport: Transport | None = None) -> None:
+    def __init__(
+        self,
+        cfg: LabConfig,
+        transport: Transport | None = None,
+        scorer: Scorer | None = None,
+    ) -> None:
         self.cfg = cfg
+        self.scorer = scorer
         cfg.run_dir.mkdir(parents=True, exist_ok=True)
         install_frozen_eval(cfg.frozen_eval_dir)
         cfg.sandbox_dir.mkdir(parents=True, exist_ok=True)
         cfg.packs_dir.mkdir(parents=True, exist_ok=True)
         cfg.jobs_dir.mkdir(parents=True, exist_ok=True)
+        cfg.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.notebook = Notebook(cfg.notebook_path, cfg.beliefs_path)
+        self.hypothesis = HypothesisStore(cfg.hypothesis_path)
+        self.episodes = EpisodeStore(cfg.episodes_dir)
         self.packs = PackStore(cfg.packs_dir)
         self.jobs = JobManager(cfg)
         self.sandbox = Sandbox(cfg, transport=transport)
@@ -71,6 +84,10 @@ class Supervisor:
             "last_eval": self.state.last_eval,
             "last_metrics": self.state.last_metrics,
             "subject_checkpoint": self.cfg.subject_checkpoint,
+            "last_checkpoint": self._last_checkpoint(),
+            "episodes": self.episodes.summaries(n=8),
+            "hypothesis": self.hypothesis.current.summary(),
+            "data_cache": list_cache(self.cfg.data_cache_dir),
             "research": {
                 "tool_calls": self.state.research_tool_calls,
                 "max_tool_calls": self.cfg.research_max_tool_calls,
@@ -78,13 +95,45 @@ class Supervisor:
             },
         }
 
+    def _last_checkpoint(self) -> str | None:
+        ckpts = sorted(p for p in self.cfg.checkpoints_dir.glob("job-*.pt") if p.is_file())
+        if ckpts:
+            return str(ckpts[-1])
+        metrics = self.state.last_metrics or {}
+        for key in ("run_checkpoint", "checkpoint"):
+            raw = metrics.get(key)
+            if raw and Path(str(raw)).is_file():
+                return str(raw)
+        return None
+
     def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.dispatch(name, args or {})
+        self._log_tool(name, result)
         self.save()
         return result.to_dict()
 
+    def _log_tool(self, name: str, result: ToolResult) -> None:
+        rec = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "cycle": self.state.cycle,
+            "phase": self.state.phase,
+            "tool": name,
+            "ok": result.ok,
+            "error": result.error,
+        }
+        path = self.cfg.run_dir / "tools.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+        flag = "ok" if result.ok else f"err={result.error}"
+        print(f"[tool] {self.state.phase} c{self.state.cycle} {name} {flag}", flush=True)
+
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
-        if self.state.halted and name != "read_notebook":
+        if self.state.halted and name not in {
+            "read_notebook",
+            "list_episodes",
+            "read_episode",
+            "read_hypothesis",
+        }:
             return err("run is halted", reason=self.state.halt_reason)
         phase = self.state.phase_enum()
         allowed = PHASE_TOOLS[phase]
@@ -123,10 +172,13 @@ class Supervisor:
             kind="halt",
             text=reason,
         )
+        self.save()
 
     def save_pack(self, pack: ArtifactPack) -> str:
         digest = self.packs.save(pack)
         self.state.pack_hash = digest
+        self.hypothesis.current.mark("pack_ready", True)
+        self.hypothesis.save()
         self.notebook.append(
             cycle=self.state.cycle,
             phase=self.state.phase,
@@ -139,7 +191,7 @@ class Supervisor:
 
     def run_eval(self) -> dict[str, Any]:
         pack = self.packs.load(self.state.pack_hash) if self.state.pack_hash else None
-        result = run_eval(self.cfg, pack, self.state.last_metrics)
+        result = run_eval(self.cfg, pack, self.state.last_metrics, scorer=self.scorer)
         self.state.last_eval = result
         self.state.eval_ran_this_phase = True
         self.notebook.append(
@@ -148,8 +200,39 @@ class Supervisor:
             kind="eval",
             pack_hash=self.state.pack_hash,
             metrics=result,
-            text=f"eval score={result.get('score')} confirm={result.get('confirm_score')}",
+            text=(
+                f"eval confirm_ppl={result.get('confirm_ppl')} "
+                f"val_ppl={(result.get('loss') or {}).get('val_ppl')} "
+                f"backend={result.get('backend')}"
+            ),
         )
+        if (
+            self.state.completed_cycles > 0
+            and self.state.current_job_id
+            and pack is not None
+        ):
+            job = self.jobs.store.load(self.state.current_job_id)
+            ep = self.episodes.record(
+                cycle=self.state.completed_cycles,
+                pack=pack,
+                pack_hash=self.state.pack_hash or "",
+                job=job,
+                ev=result,
+            )
+            self.notebook.set_beliefs(self.episodes.beliefs_markdown())
+            self.notebook.append(
+                cycle=self.state.cycle,
+                phase=self.state.phase,
+                kind="episode",
+                pack_hash=self.state.pack_hash,
+                text=f"sealed {ep['id']}: {ep['title']}",
+            )
+            self.hypothesis.current.mark("post_eval", True)
+            self.hypothesis.current.mark("episode_sealed", True)
+            if result.get("confirm_source") and result.get("confirm_source") != "trainer_val_proxy":
+                self.hypothesis.current.mark("holdout_not_proxy", True)
+            self.hypothesis.current.supporting_episodes.append(ep["id"])
+            self.hypothesis.save()
         return result
 
     def transition_research(self) -> ToolResult:
@@ -157,6 +240,9 @@ class Supervisor:
         self.state.research_tool_calls = 0
         self.state.research_started_at = time.time()
         self.state.eval_ran_this_phase = False
+        self.state.pack_hash = None
+        self.hypothesis.current.mark("pack_ready", False)
+        self.hypothesis.save()
         self.notebook.append(
             cycle=self.state.cycle,
             phase=self.state.phase,
@@ -168,6 +254,12 @@ class Supervisor:
     def transition_train(self) -> ToolResult:
         if not self.state.pack_hash or not self.packs.exists(self.state.pack_hash):
             return err("write_pack before enter_train")
+        open_train = self.hypothesis.current.open_for("train")
+        if open_train:
+            return err(
+                "hypothesis checklist blocks train",
+                open=[c.id for c in open_train],
+            )
         pack = self.packs.load(self.state.pack_hash)
         if pack.budgets.max_hours > self.cfg.train_max_hours:
             return err("pack budget exceeds harness train_max_hours")
@@ -239,6 +331,9 @@ class Supervisor:
                 self.halt("max_cycles reached")
                 break
             name, args = policy.act(obs)
-            self.call(name, args)
+            result = self.call(name, args)
+            observe = getattr(policy, "observe_result", None)
+            if callable(observe):
+                observe(result)
             steps += 1
         return {"steps": steps, **self.observe()}

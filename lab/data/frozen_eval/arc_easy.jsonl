@@ -1,0 +1,16 @@
+{"id": "arc-01", "context": "What do plants need to make food?", "endings": ["Sunlight, water, and air", "Only rocks", "Electricity from a wall", "Moonlight and salt"], "label": 0}
+{"id": "arc-02", "context": "Water frozen into a solid is called", "endings": ["steam", "ice", "soil", "oil"], "label": 1}
+{"id": "arc-03", "context": "Which organ pumps blood through the body?", "endings": ["Lungs", "Stomach", "Heart", "Skin"], "label": 2}
+{"id": "arc-04", "context": "The Earth orbits the", "endings": ["Moon", "Sun", "Mars", "ISS"], "label": 1}
+{"id": "arc-05", "context": "A magnet is most likely to attract", "endings": ["wood", "paper", "iron", "plastic"], "label": 2}
+{"id": "arc-06", "context": "Which of these is a source of light?", "endings": ["A rock", "The Sun", "A shadow", "Cold air"], "label": 1}
+{"id": "arc-07", "context": "Animals that eat only plants are called", "endings": ["herbivores", "carnivores", "machines", "metals"], "label": 0}
+{"id": "arc-08", "context": "Sound travels fastest through", "endings": ["outer space vacuum", "steel", "a quiet thought", "a shadow"], "label": 1}
+{"id": "arc-09", "context": "Which is a solid at room temperature?", "endings": ["Oxygen", "Water vapor", "Ice", "Helium"], "label": 2}
+{"id": "arc-10", "context": "Humans breathe in oxygen and breathe out", "endings": ["nitrogen only", "carbon dioxide", "liquid iron", "pure ozone"], "label": 1}
+{"id": "arc-11", "context": "A tadpole grows into a", "endings": ["frog", "bird", "tree", "cloud"], "label": 0}
+{"id": "arc-12", "context": "The boiling point of water at standard pressure is about", "endings": ["0 C", "100 C", "1000 C", "-40 C"], "label": 1}
+{"id": "arc-13", "context": "Which tool is used to measure temperature?", "endings": ["Thermometer", "Hammer", "Compass rose", "Spoon"], "label": 0}
+{"id": "arc-14", "context": "Shadows are longest when the Sun is", "endings": ["overhead at noon", "low in the sky", "turned off", "inside the Earth"], "label": 1}
+{"id": "arc-15", "context": "Which of these is a renewable energy source?", "endings": ["Coal", "Wind", "Gasoline", "Diesel"], "label": 1}
+{"id": "arc-16", "context": "Insects typically have how many legs?", "endings": ["Two", "Four", "Six", "Ten"], "label": 2}

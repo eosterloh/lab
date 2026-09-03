@@ -59,6 +59,47 @@ def read_samples(sup: Any, args: Args) -> ToolResult:
     return ok(samples=samples or [])
 
 
+def list_episodes(sup: Any, args: Args) -> ToolResult:
+    n = int(args.get("n", 12))
+    query = args.get("query")
+    return ok(episodes=sup.episodes.summaries(n=n, query=query))
+
+
+def read_episode(sup: Any, args: Args) -> ToolResult:
+    ep_id = str(args.get("id") or "")
+    if not ep_id:
+        return err("id is required")
+    try:
+        ep = sup.episodes.load(ep_id)
+    except FileNotFoundError:
+        return err(f"unknown episode {ep_id}")
+    md_path = sup.cfg.episodes_dir / f"{ep_id}.md"
+    card = md_path.read_text(encoding="utf-8") if md_path.is_file() else None
+    return ok(episode=ep, card=card)
+
+
+def read_hypothesis(sup: Any, args: Args) -> ToolResult:
+    return ok(hypothesis=sup.hypothesis.current.to_dict(), summary=sup.hypothesis.current.summary())
+
+
+def write_hypothesis(sup: Any, args: Args) -> ToolResult:
+    from lab.parse import _flatten_hypothesis_args
+
+    args = _flatten_hypothesis_args(args)
+    try:
+        hyp = sup.hypothesis.update(
+            claim=args.get("claim"),
+            why=args.get("why"),
+            falsify=args.get("falsify"),
+            status=args.get("status"),
+        )
+    except Exception as e:
+        return err(str(e))
+    if not hyp.claim:
+        return err("claim is required")
+    return ok(hypothesis=hyp.summary())
+
+
 def enter_research(sup: Any, args: Args) -> ToolResult:
     return sup.transition_research()
 
@@ -113,6 +154,26 @@ def web_search(sup: Any, args: Args) -> ToolResult:
         return err(str(e))
 
 
+def prefetch_data(sup: Any, args: Args) -> ToolResult:
+    from lab.data_cache import compose_hf_source, ensure_hf_text, list_cache
+
+    try:
+        source = compose_hf_source(args)
+        path = ensure_hf_text(
+            source,
+            sup.cfg.data_cache_dir,
+            allow_network=sup.cfg.allow_network,
+        )
+    except Exception as e:
+        return err(str(e))
+    return ok(
+        source=source,
+        path=str(path),
+        bytes=path.stat().st_size,
+        cache=list_cache(sup.cfg.data_cache_dir),
+    )
+
+
 def write_pack(sup: Any, args: Args) -> ToolResult:
     payload = args.get("pack") or args
     try:
@@ -153,6 +214,10 @@ REGISTRY: dict[str, Handler] = {
     "run_eval": run_eval,
     "read_metrics": read_metrics,
     "read_samples": read_samples,
+    "list_episodes": list_episodes,
+    "read_episode": read_episode,
+    "read_hypothesis": read_hypothesis,
+    "write_hypothesis": write_hypothesis,
     "enter_research": enter_research,
     "list_files": list_files,
     "read_file": read_file,
@@ -160,6 +225,7 @@ REGISTRY: dict[str, Handler] = {
     "exec": exec_cmd,
     "web_fetch": web_fetch,
     "web_search": web_search,
+    "prefetch_data": prefetch_data,
     "write_pack": write_pack,
     "enter_train": enter_train,
     "job_status": job_status,

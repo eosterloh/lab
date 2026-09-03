@@ -1,0 +1,16 @@
+{"id": "hs-01", "context": "The child picked up the glass of water and, being thirsty,", "endings": ["poured it into the piano.", "drank it.", "tied it to a kite.", "mailed it to the moon."], "label": 1}
+{"id": "hs-02", "context": "After it rained, the ground was wet, so she", "endings": ["put on sunglasses to stay dry.", "lit a candle to dry the sky.", "put on boots before going outside.", "opened the freezer for a towel."], "label": 2}
+{"id": "hs-03", "context": "He wanted the room to be dark so he could sleep. He", "endings": ["turned off the light.", "opened all the blinds.", "started a drum solo.", "watered the carpet."], "label": 0}
+{"id": "hs-04", "context": "The ice cream sat in the sun for an hour and then", "endings": ["turned into a snowman.", "melted.", "froze harder.", "learned to talk."], "label": 1}
+{"id": "hs-05", "context": "To cross the river without a boat, they used the", "endings": ["bridge.", "cloud.", "recipe.", "keyboard."], "label": 0}
+{"id": "hs-06", "context": "She was cold, so she put on a", "endings": ["swimsuit.", "coat.", "ice cube.", "banana."], "label": 1}
+{"id": "hs-07", "context": "The baker took the bread out of the", "endings": ["oven.", "mailbox.", "lake.", "chimney while it was raining frogs."], "label": 0}
+{"id": "hs-08", "context": "When the balloon popped, it made a loud", "endings": ["whisper.", "nap.", "bang.", "recipe."], "label": 2}
+{"id": "hs-09", "context": "He planted the seeds in soil and watered them so they would", "endings": ["grow.", "migrate to Canada.", "file taxes.", "evaporate into coins."], "label": 0}
+{"id": "hs-10", "context": "The library is a place where people usually", "endings": ["race motorcycles indoors.", "borrow books.", "smelt iron.", "park submarines."], "label": 1}
+{"id": "hs-11", "context": "She set an alarm because she needed to", "endings": ["wake up on time.", "make the sun rise.", "stop gravity.", "paint the air."], "label": 0}
+{"id": "hs-12", "context": "The hungry dog stared at the bowl until someone", "endings": ["filled it with food.", "tied it to a satellite.", "taught it calculus.", "turned it into a hat."], "label": 0}
+{"id": "hs-13", "context": "To send the letter, he put a stamp on it and", "endings": ["ate the envelope.", "dropped it in a mailbox.", "threw it in the ocean.", "glued it to a window."], "label": 1}
+{"id": "hs-14", "context": "The match was used to", "endings": ["light the candle.", "measure the mountain.", "download a file.", "vote in an election."], "label": 0}
+{"id": "hs-15", "context": "Because the soup was too salty, they", "endings": ["added more water.", "added more salt.", "put it in the freezer to unsalt it.", "sang to it."], "label": 0}
+{"id": "hs-16", "context": "He tied his shoelaces so he would not", "endings": ["trip.", "photosynthesize.", "orbit the earth.", "become a tree."], "label": 0}

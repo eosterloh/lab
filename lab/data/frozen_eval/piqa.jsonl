@@ -1,0 +1,16 @@
+{"id": "piqa-01", "context": "To keep leftover soup for tomorrow,", "endings": ["put it in a sealed container in the fridge", "leave it on the counter in the sun"], "label": 0}
+{"id": "piqa-02", "context": "To hang a picture on drywall,", "endings": ["press it against the wall with no hardware", "use a hook or nail rated for the weight"], "label": 1}
+{"id": "piqa-03", "context": "To cool a burn from hot water,", "endings": ["run cool water over it", "rub butter on it"], "label": 0}
+{"id": "piqa-04", "context": "To open a stuck jar lid,", "endings": ["run the lid under hot water and twist", "put the jar in the freezer then smash it"], "label": 0}
+{"id": "piqa-05", "context": "To keep cut apples from browning quickly,", "endings": ["leave them in a warm oven", "toss them with a little lemon juice"], "label": 1}
+{"id": "piqa-06", "context": "To measure a cup of flour for baking,", "endings": ["scoop and level it in a measuring cup", "guess by holding it in your hands over the mixer"], "label": 0}
+{"id": "piqa-07", "context": "To defrost meat safely,", "endings": ["leave it on a sunny sidewalk", "thaw it in the refrigerator"], "label": 1}
+{"id": "piqa-08", "context": "To stop a small grease fire in a pan,", "endings": ["slide a lid over the pan and turn off heat", "pour a glass of water on it"], "label": 0}
+{"id": "piqa-09", "context": "To keep onions from making you cry as much,", "endings": ["chill them and use a sharp knife", "cut them with a dull knife near your face"], "label": 0}
+{"id": "piqa-10", "context": "To remove a splinter,", "endings": ["clean the skin and ease it out with tweezers", "rub dirt into the spot"], "label": 0}
+{"id": "piqa-11", "context": "To keep bread from going stale as fast,", "endings": ["store it in a bread box or sealed bag", "leave it unwrapped on a heater"], "label": 0}
+{"id": "piqa-12", "context": "To tighten a loose screw,", "endings": ["turn it with a matching screwdriver", "hit it with a hammer until it disappears"], "label": 0}
+{"id": "piqa-13", "context": "To dry wet shoes overnight,", "endings": ["stuff them with newspaper and leave them at room temperature", "put them in a running microwave"], "label": 0}
+{"id": "piqa-14", "context": "To keep pasta from sticking while boiling,", "endings": ["stir it in plenty of water", "add a cup of flour to the pot"], "label": 0}
+{"id": "piqa-15", "context": "To carry a cake without smearing the frosting,", "endings": ["hold it by the frosting", "support the board underneath and keep it level"], "label": 1}
+{"id": "piqa-16", "context": "To unclog a slow sink drain first,", "endings": ["try a plunger or remove the hair from the stopper", "pour concrete down it"], "label": 0}
