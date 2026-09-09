@@ -66,6 +66,7 @@ runs/<id>/
   checkpoints/        copies of job-XXXX.pt
   frozen_eval/        copied suite (read-only)
   episodes/           skill cards after train+eval
+  trace.jsonl         one row per span: run, cycle, step, tool, policy turn
 ```
 
 The **lab** trainer is a sandboxed subprocess (`python -m lab.train`) with cwd = the job dir, stripped env (`HOME`/`TMPDIR` inside the job), and a wall-clock timeout from `budgets.max_hours`. Needs `pip install torch` (or `pip install -e ".[train]"`). Dummy stays the fast no-torch path.
@@ -83,6 +84,30 @@ Tests: `pytest`
 | `LAB_ALLOW_NETWORK` | `0` disables fetch/search **and** Hub downloads on cache miss |
 | `LAB_DATA_CACHE` | allowlisted HF text cache (default `~/data/lab`) |
 | `LAB_POLICY_MODEL` | experimenter checkpoint (default `~/models/Qwen3.8-27B`) |
+| `LANGSMITH_TRACING` | `true` mirrors spans to LangSmith (needs `pip install -e ".[trace]"`) |
+| `LANGSMITH_API_KEY` | LangSmith key; without it only the local `trace.jsonl` is written |
+| `LANGSMITH_PROJECT` | LangSmith project name (default `lab-harness`) |
+
+## Tracing
+
+Every run writes `trace.jsonl` locally, with no dependencies and no network.
+Set `LANGSMITH_TRACING=true` to also mirror the tree to LangSmith. A sink that
+fails never fails the run: a bad key costs stderr noise, nothing else.
+
+```bash
+pip install -e ".[trace]"
+export LANGSMITH_TRACING=true LANGSMITH_API_KEY=lsv2_... LANGSMITH_PROJECT=lab-harness
+python -m lab run --policy qwen --cycles 12 --run-dir runs/qwen-12
+
+python -m lab trace-report --run-dir runs/qwen-12          # markdown digest
+python -m lab trace-report --run-dir runs/qwen-12 --json    # machine-readable
+```
+
+The span tree is `lab.run → cycle N → step K → {policy.act | policy.nudge, tool.<name>}`.
+Policy turns carry the prompt, the raw completion, and the tool that was parsed
+out of it; tool spans carry args, the result, and the rejection reason. Cycle,
+phase, and tool are attached as both metadata and tags, so in LangSmith you can
+filter to one phase or one tool across a whole run.
 
 ## Policy tools
 

@@ -141,6 +141,11 @@ class HypothesisStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.md_path = path.with_suffix(".md")
+        self.archive_path = path.with_name("hypotheses.json")
+        self.archive: list[dict[str, Any]] = []
+        if self.archive_path.is_file():
+            loaded = json.loads(self.archive_path.read_text(encoding="utf-8"))
+            self.archive = loaded if isinstance(loaded, list) else []
         if path.is_file():
             self.current = LiveHypothesis.from_dict(json.loads(path.read_text(encoding="utf-8")))
         else:
@@ -152,6 +157,21 @@ class HypothesisStore:
         tmp.write_text(json.dumps(self.current.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self.path)
         self.md_path.write_text(self.current.markdown(), encoding="utf-8")
+
+    def roll(self) -> LiveHypothesis:
+        """Retire the finished theory and open a blank one for a new cycle.
+
+        Episode links stay on the archived card; the checklist reopens so the
+        policy must write a claim and a pack before this cycle can train.
+        """
+        prior = self.current
+        self.archive.append(prior.to_dict())
+        self.archive_path.write_text(
+            json.dumps(self.archive, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        self.current = LiveHypothesis()
+        self.save()
+        return self.current
 
     def update(
         self,

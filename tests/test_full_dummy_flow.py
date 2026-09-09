@@ -87,6 +87,15 @@ def test_promote_uses_confirmation_metric_and_rejects_tiny_deltas(sup) -> None:
     assert second["promoted"] is False
 
 
+def test_promote_refuses_an_unchanged_score(sup) -> None:
+    """A tie is not a win — the same checkpoint must not promote twice."""
+    sup.run_policy(DummyPolicy(), max_cycles=1, max_steps=50)
+    assert promote(sup.cfg.run_dir)["promoted"] is True
+    again = promote(sup.cfg.run_dir)
+    assert again["promoted"] is False
+    assert again["reason"] == "confirm_score did not beat champion"
+
+
 def test_cli_dummy_two_cycles_writes_run_dir(tmp_path: Path, monkeypatch) -> None:
     """python -m lab run --policy dummy --cycles 2 must exit 0 and leave artifacts."""
     monkeypatch.setenv("LAB_GPU_LOCK", str(tmp_path / "gpu.lock"))

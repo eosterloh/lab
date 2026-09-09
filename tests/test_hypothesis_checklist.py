@@ -52,6 +52,38 @@ def test_enter_train_blocked_until_checklist_and_pack_are_ready(sup) -> None:
     assert started["job"]["status"] == "succeeded"
 
 
+def test_new_cycle_reopens_the_claim_so_the_policy_must_rewrite_it(sup) -> None:
+    """Each cycle gets its own theory; a stale claim must not unlock train."""
+    arm_for_train(sup)
+    assert sup.call("enter_train")["ok"]
+    assert sup.call("enter_eval")["ok"]
+    assert sup.call("run_eval")["ok"]
+
+    assert sup.call("enter_research")["ok"]
+    hyp = sup.observe()["hypothesis"]
+    assert hyp["claim"] == ""
+    assert "claim_written" in hyp["open_train"]
+
+    pack = dummy_pack(sup.observe())
+    assert sup.call("write_pack", {"pack": pack})["ok"]
+    blocked = sup.call("enter_train")
+    assert blocked["ok"] is False
+    assert "claim_written" in blocked["open"]
+
+
+def test_rolled_hypotheses_are_archived(sup) -> None:
+    arm_for_train(sup)
+    assert sup.call("enter_train")["ok"]
+    assert sup.call("enter_eval")["ok"]
+    assert sup.call("run_eval")["ok"]
+    assert sup.call("enter_research")["ok"]
+
+    archive = sup.hypothesis.archive
+    assert len(archive) == 1
+    assert archive[0]["claim"] == "dummy overtrain improves confirm_ppl"
+    assert sup.hypothesis.archive_path.is_file()
+
+
 def test_read_hypothesis_allowed_after_halt(sup) -> None:
     from lab.policy import DummyPolicy
 

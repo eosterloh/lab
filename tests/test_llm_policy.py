@@ -6,8 +6,9 @@ import json
 
 from lab.llm_policy import SYSTEM, InferPolicy
 from lab.parse import parse_tool_call
-from lab.policy import dummy_pack
+from lab.policy import dummy_pack, lab_pack
 from lab.supervisor import Supervisor
+from tests.helpers import arm_for_train
 
 
 class SeqEngine:
@@ -84,17 +85,135 @@ def test_infer_policy_maps_eval_write_hypothesis_to_enter_research(sup: Supervis
     assert args == {}
 
 
-def test_infer_policy_skips_repeat_write_hypothesis_when_claim_exists(sup: Supervisor) -> None:
+def test_infer_policy_lets_the_model_refine_its_hypothesis(sup: Supervisor) -> None:
+    """A second write_hypothesis is the model's business, not a fallback pack."""
     assert sup.call("enter_research")["ok"]
     assert sup.call(
         "write_hypothesis",
         {"claim": "already set", "why": "fixture", "falsify": "job fails"},
     )["ok"]
     replies = [
-        '{"tool": "write_hypothesis", "args": {"claim": "again", "why": "loop", "falsify": "x"}}'
+        '{"tool": "write_hypothesis", "args": {"claim": "sharper", "why": "loop", "falsify": "x"}}'
     ]
     policy = InferPolicy(SeqEngine(replies), max_new_tokens=64)
     name, args = policy.act(sup.observe())
+    assert name == "write_hypothesis"
+    assert args["claim"] == "sharper"
+
+
+def _hyp_reply(claim: str = "again") -> str:
+    return json.dumps(
+        {"tool": "write_hypothesis", "args": {"claim": claim, "why": "loop", "falsify": "x"}}
+    )
+
+
+def test_hypothesis_loop_nudges_the_model_to_author_the_pack(sup: Supervisor) -> None:
+    """The loop breaker must ask the model for a pack, not write one for it."""
+    assert sup.call("enter_research")["ok"]
+    obs = sup.observe()
+    model_pack = lab_pack(obs)
+    model_pack["config"]["lr"] = 7e-4
+    model_pack["config"]["steps"] = 96
+    replies = [
+        _hyp_reply(),
+        _hyp_reply(),
+        _hyp_reply(),
+        json.dumps({"tool": "write_pack", "args": {"pack": model_pack}}),
+    ]
+    policy = InferPolicy(SeqEngine(replies), max_new_tokens=64, max_hyp_writes_per_cycle=2)
+    assert policy.act(obs)[0] == "write_hypothesis"
+    assert policy.act(obs)[0] == "write_hypothesis"
+    name, args = policy.act(obs)
+    assert name == "write_pack"
+    assert args["pack"]["config"]["lr"] == 7e-4
+    assert args["pack"]["config"]["steps"] == 96
+
+
+def test_repeated_rejections_force_the_policy_forward(sup: Supervisor) -> None:
+    """A capped read loop must advance, not burn the whole step budget."""
+    assert sup.call("enter_research")["ok"]
+    arm_for_train(sup)
+    sup.cfg.research_max_tool_calls = 0
+    reply = '{"tool": "list_episodes", "args": {}}'
+    policy = InferPolicy(SeqEngine([reply] * 12), max_new_tokens=64, max_error_streak=3)
+
+    names = []
+    for _ in range(5):
+        name, args = policy.act(sup.observe())
+        result = sup.call(name, args)
+        policy.observe_result(result)
+        names.append(name)
+    # Reads get capped, then the policy gives up on reading and trains.
+    assert names[:3] == ["list_episodes"] * 3
+    assert "enter_train" in names
+
+
+def test_read_budget_pushes_the_model_to_write_its_own_pack(sup: Supervisor) -> None:
+    """A read/read loop must end in the model's pack, not a harness pack."""
+    assert sup.call("enter_research")["ok"]
+    assert sup.call(
+        "write_hypothesis", {"claim": "set", "why": "fixture", "falsify": "x"}
+    )["ok"]
+    obs = sup.observe()
+    model_pack = lab_pack(obs)
+    model_pack["config"]["lr"] = 4e-4
+    replies = [
+        '{"tool": "list_episodes", "args": {}}',
+        '{"tool": "read_episode", "args": {"id": "ep-0001"}}',
+        '{"tool": "list_episodes", "args": {}}',
+        '{"tool": "read_episode", "args": {"id": "ep-0001"}}',
+        '{"tool": "list_episodes", "args": {}}',
+        json.dumps({"tool": "write_pack", "args": {"pack": model_pack}}),
+    ]
+    policy = InferPolicy(SeqEngine(replies), max_new_tokens=64, max_reads_per_cycle=4)
+    names = [policy.act(obs)[0] for _ in range(4)]
+    assert names == ["list_episodes", "read_episode", "list_episodes", "read_episode"]
+    name, args = policy.act(obs)
+    assert name == "write_pack"
+    assert args["pack"]["config"]["lr"] == 4e-4
+
+
+def test_read_budget_asks_for_the_hypothesis_first_when_the_claim_is_empty(
+    sup: Supervisor,
+) -> None:
+    """Nudging straight to write_pack would trip the train checklist."""
+    assert sup.call("enter_research")["ok"]
+    obs = sup.observe()
+    replies = ['{"tool": "list_episodes", "args": {}}'] * 5 + [
+        '{"tool": "write_hypothesis", "args": {"claim": "c", "why": "w", "falsify": "f"}}'
+    ]
+    policy = InferPolicy(SeqEngine(replies), max_new_tokens=64, max_reads_per_cycle=4)
+    for _ in range(4):
+        policy.act(obs)
+    name, args = policy.act(obs)
+    assert name == "write_hypothesis"
+    assert args["claim"] == "c"
+
+
+def test_wedged_policy_halts_instead_of_burning_the_budget(sup: Supervisor) -> None:
+    class StuckPolicy:
+        def act(self, obs: dict) -> tuple[str, dict]:
+            return "prefetch_data", {"source": "hf:not/allowlisted"}
+
+    assert sup.call("enter_research")["ok"]
+    result = sup.run_policy(StuckPolicy(), max_cycles=1, max_steps=200, max_error_streak=5)
+    assert result["halted"] is True
+    assert "wedged" in result["halt_reason"]
+    assert result["steps"] == 5
+
+
+def test_hypothesis_loop_falls_back_only_when_the_nudge_fails(sup: Supervisor) -> None:
+    assert sup.call("enter_research")["ok"]
+    assert sup.call(
+        "write_hypothesis", {"claim": "set", "why": "fixture", "falsify": "x"}
+    )["ok"]
+    obs = sup.observe()
+    policy = InferPolicy(
+        SeqEngine([_hyp_reply()] * 6), max_new_tokens=64, max_hyp_writes_per_cycle=2
+    )
+    assert policy.act(obs)[0] == "write_hypothesis"
+    assert policy.act(obs)[0] == "write_hypothesis"
+    name, args = policy.act(obs)
     assert name == "write_pack"
     assert args["pack"]["trainer"] == "lab"
 

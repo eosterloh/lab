@@ -18,6 +18,7 @@ from lab.pack import ArtifactPack, PackStore
 from lab.sandbox import Sandbox
 from lab.scorer import Scorer
 from lab.state import RunState
+from lab.tracing import CHAIN, TOOL, Tracer
 from lab.types import PHASE_TOOLS, Phase, ToolResult, err, ok
 from lab.data_cache import list_cache
 
@@ -28,6 +29,7 @@ class Supervisor:
         cfg: LabConfig,
         transport: Transport | None = None,
         scorer: Scorer | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         self.cfg = cfg
         self.scorer = scorer
@@ -44,6 +46,7 @@ class Supervisor:
         self.jobs = JobManager(cfg)
         self.sandbox = Sandbox(cfg, transport=transport)
         self.gpu = GpuLock(cfg.gpu_lock_path)
+        self.tracer = tracer or Tracer(cfg.run_dir / "trace.jsonl")
         self.state = self._load_state()
         if not cfg.notebook_path.exists() or cfg.notebook_path.stat().st_size == 0:
             self.notebook.append(
@@ -241,6 +244,8 @@ class Supervisor:
         self.state.research_started_at = time.time()
         self.state.eval_ran_this_phase = False
         self.state.pack_hash = None
+        if self.hypothesis.current.claim.strip():
+            self.hypothesis.roll()
         self.hypothesis.current.mark("pack_ready", False)
         self.hypothesis.save()
         self.notebook.append(
@@ -319,21 +324,69 @@ class Supervisor:
         )
         return ok(phase=self.state.phase, cycle=self.state.cycle, completed_cycles=self.state.completed_cycles)
 
-    def run_policy(self, policy: Any, max_cycles: int = 1, max_steps: int = 200) -> dict[str, Any]:
+    def run_policy(
+        self,
+        policy: Any,
+        max_cycles: int = 1,
+        max_steps: int = 200,
+        max_error_streak: int = 12,
+    ) -> dict[str, Any]:
         steps = 0
-        while steps < max_steps and not self.state.halted:
-            obs = self.observe()
-            if (
-                self.state.completed_cycles >= max_cycles
-                and self.state.phase_enum() is Phase.EVAL
-                and self.state.eval_ran_this_phase
-            ):
-                self.halt("max_cycles reached")
-                break
-            name, args = policy.act(obs)
-            result = self.call(name, args)
-            observe = getattr(policy, "observe_result", None)
-            if callable(observe):
-                observe(result)
-            steps += 1
-        return {"steps": steps, **self.observe()}
+        err_streak = 0
+        run_inputs = {
+            "policy": type(policy).__name__,
+            "max_cycles": max_cycles,
+            "max_steps": max_steps,
+        }
+        with self.tracer.span("lab.run", kind=CHAIN, inputs=run_inputs) as run_span:
+            while steps < max_steps and not self.state.halted:
+                obs = self.observe()
+                if (
+                    self.state.completed_cycles >= max_cycles
+                    and self.state.phase_enum() is Phase.EVAL
+                    and self.state.eval_ran_this_phase
+                ):
+                    self.halt("max_cycles reached")
+                    break
+                self.tracer.enter_cycle(self.state.cycle)
+                phase = self.state.phase
+                with self.tracer.span(
+                    f"step {steps + 1}",
+                    kind=CHAIN,
+                    metadata={"cycle": self.state.cycle, "phase": phase},
+                ) as step_span:
+                    name, args = policy.act(obs)
+                    with self.tracer.span(
+                        f"tool.{name}",
+                        kind=TOOL,
+                        inputs=args,
+                        metadata={"cycle": self.state.cycle, "phase": phase, "tool": name},
+                    ) as tool_span:
+                        result = self.call(name, args)
+                        tool_span.set(
+                            outputs=result,
+                            error=None if result.get("ok") else str(result.get("error")),
+                        )
+                    step_span.set(outputs={"tool": name, "ok": result.get("ok")})
+                observe = getattr(policy, "observe_result", None)
+                if callable(observe):
+                    observe(result)
+                steps += 1
+                # A policy that ignores rejections would otherwise burn the whole
+                # step budget in one phase, as a wedged read loop once did.
+                err_streak = 0 if result.get("ok") else err_streak + 1
+                if err_streak >= max_error_streak:
+                    self.halt(f"policy wedged: {err_streak} consecutive tool errors")
+                    break
+            self.tracer.close_cycle()
+            final = {"steps": steps, **self.observe()}
+            run_span.set(
+                outputs={
+                    "steps": steps,
+                    "completed_cycles": self.state.completed_cycles,
+                    "halted": self.state.halted,
+                    "halt_reason": self.state.halt_reason,
+                    "confirm_ppl": (self.state.last_eval or {}).get("confirm_ppl"),
+                }
+            )
+        return final

@@ -12,6 +12,7 @@ from lab.llm_policy import DEFAULT_POLICY_MODEL, InferPolicy, load_infer_engine
 from lab.policy import DummyPolicy, InterleavePolicy, LabPolicy, ScriptedPolicy
 from lab.promote import promote
 from lab.supervisor import Supervisor
+from lab.trace_report import markdown, summarize
 
 
 def _timestamp() -> str:
@@ -66,6 +67,7 @@ def cmd_run(
             engine,
             max_new_tokens=max_new_tokens,
             log_path=run_dir / "policy.jsonl",
+            tracer=sup.tracer,
         )
     else:
         raise SystemExit(f"unknown policy {policy_name}")
@@ -84,6 +86,12 @@ def cmd_promote(run_dir: Path, min_delta: float) -> int:
     result = promote(run_dir, min_delta=min_delta)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("promoted") else 1
+
+
+def cmd_trace_report(run_dir: Path, as_json: bool) -> int:
+    summary = summarize(run_dir)
+    print(json.dumps(summary, indent=2, default=str) if as_json else markdown(summary))
+    return 0 if summary["spans"] else 1
 
 
 def cmd_seal(run_dir: Path) -> int:
@@ -149,11 +157,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_seal = sub.add_parser("seal", help="seal latest job+eval into an episode card")
     add_run_dir(p_seal)
 
+    p_trace = sub.add_parser("trace-report", help="digest a run's trace.jsonl")
+    add_run_dir(p_trace)
+    p_trace.add_argument("--json", action="store_true", help="machine-readable output")
+
     args = p.parse_args(argv)
     run_dir = args.run_dir
     if run_dir is None:
         run_dir = Path("runs") / _timestamp()
-        if args.cmd == "status" or args.cmd == "promote" or args.cmd == "seal":
+        if args.cmd in {"status", "promote", "seal", "trace-report"}:
             p.error("--run-dir is required")
 
     if args.cmd == "init":
@@ -174,4 +186,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_promote(run_dir, args.min_delta)
     if args.cmd == "seal":
         return cmd_seal(run_dir)
+    if args.cmd == "trace-report":
+        return cmd_trace_report(run_dir, args.json)
     raise SystemExit("unknown command")

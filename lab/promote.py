@@ -25,7 +25,11 @@ def promote(run_dir: Path, min_delta: float = 0.0) -> dict[str, Any]:
             return {"promoted": False, "reason": "eval suite changed; bump is a domain jump, not a win"}
         confirm = float(ev["confirm_score"])
         best = float(champ["confirm_score"])
-        beat = confirm >= best + min_delta if higher else confirm <= best - min_delta
+        # A tie is not a win: an unchanged score must never re-promote.
+        if higher:
+            beat = confirm > best and confirm >= best + min_delta
+        else:
+            beat = confirm < best and confirm <= best - min_delta
         if not beat:
             return {
                 "promoted": False,
