@@ -99,6 +99,28 @@ def test_run_policy_traces_tools_and_report_reads_it(sup) -> None:
     assert "## Cycles" in report
 
 
+def test_policy_turns_are_traced_with_prompt_and_parsed_tool(tmp_path: Path, sup) -> None:
+    """Policy turns are the spans worth reading, so they carry the most detail."""
+    from lab.llm_policy import InferPolicy
+    from tests.test_llm_policy import SeqEngine
+
+    path = tmp_path / "trace.jsonl"
+    tracer = Tracer(path, use_langsmith=False)
+    policy = InferPolicy(
+        SeqEngine(['{"tool": "run_eval", "args": {}}']),
+        max_new_tokens=64,
+        tracer=tracer,
+    )
+    assert policy.act(sup.observe())[0] == "run_eval"
+
+    row = _rows(path)[0]
+    assert row["name"] == "policy.act"
+    assert row["kind"] == LLM
+    assert row["parsed_tool"] == "run_eval"
+    assert row["phase"] == "eval"
+    assert row["prompt_chars"] > 0
+
+
 def test_report_on_a_run_with_no_trace_is_graceful(tmp_path: Path) -> None:
     summary = summarize(tmp_path)
     assert summary["spans"] == 0
