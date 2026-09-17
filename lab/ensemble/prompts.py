@@ -151,7 +151,12 @@ def transcript_tail(transcript: list[Turn], n: int = 6, clip: int = 600) -> str:
         head = f"[round {t.round}] {t.role}"
         if t.tool:
             head += f" -> {t.tool}"
-        body = _clip(t.result, clip) if t.result is not None else _clip(t.raw, clip)
+        if t.role == "harness" and t.result is not None:
+            # Harness turns are instructions (nudges carry a full pack
+            # template); clipping them would hide what we are asking for.
+            body = str(t.result.get("error") or t.result)
+        else:
+            body = _clip(t.result, clip) if t.result is not None else _clip(t.raw, clip)
         lines.append(f"{head}: {body}")
     return "\n".join(lines)
 
@@ -168,6 +173,42 @@ _PACK_EXAMPLE = json.dumps(
         "budgets": {"max_hours": 0.1, "max_steps": 64},
     }
 )
+
+def pack_template(obs: dict[str, Any], hypothesis: str | None = None) -> dict[str, Any]:
+    """A concrete, valid pack for this run that a small model only has to edit.
+
+    Small thinkers reliably state a hypothesis but stall at composing a pack
+    from a schema; handing them a filled template with the real parent
+    checkpoint turns "write a pack" into "change one number".
+    """
+    parent = obs.get("last_checkpoint") or obs.get("subject_checkpoint") or "<subject_checkpoint>"
+    return {
+        "hypothesis": hypothesis or "<one sentence: what changes and why confirm_ppl should drop>",
+        "trainer": "lab",
+        "config": {"lr": 0.001, "steps": 64, "hidden": 32, "layers": 1, "heads": 1, "seq_len": 32, "batch": 8},
+        "data_manifest": {"sources": list(DEFAULT_MIX)},
+        "eval_suite_id": "core",
+        "eval_suite_version": 1,
+        "parent_checkpoint": parent,
+        "budgets": {"max_hours": 0.1, "max_steps": 64},
+    }
+
+
+def pack_nudge(obs: dict[str, Any], hypotheses: list[dict[str, Any]]) -> str:
+    """Nudge text for a thinker that stated a hypothesis but emitted no pack."""
+    claim = hypotheses[-1]["claim"] if hypotheses else None
+    template = json.dumps(pack_template(obs, claim))
+    lead = (
+        "A hypothesis does nothing until a pack tests it. "
+        if hypotheses
+        else "You asked for nothing and emitted no pack. "
+    )
+    return (
+        lead
+        + 'Reply again with the same JSON shape, but set "pack" to this template with ONLY the values your '
+        f"claim names changed (e.g. config.lr or config.steps):\n{template}"
+    )
+
 
 _THOUGHT_SHAPE = (
     '{"thought": "<short reasoning>", '
@@ -199,6 +240,8 @@ def thinker_prompt(
         "- Keep hidden/layers/heads/seq_len identical to the parent so weights resume, unless your angle is "
         "architecture; then parent_checkpoint may be the subject and you must note that weights will not resume.\n"
         "- Write 1-3 hypotheses in total across your turns, each with claim / why / falsify.\n"
+        "- A hypothesis is inert until a pack tests it: the turn that states a hypothesis should also carry "
+        'its "pack", unless you first need a tool or code result.\n'
         "- Do not repeat a config that already appears in episodes.\n"
         "- budgets.max_hours <= 0.5. eval_suite_id 'core', eval_suite_version 1.\n"
         '- When you have nothing more to ask and no pack, set "done": true.\n'

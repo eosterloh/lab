@@ -217,6 +217,33 @@ def test_invalid_pack_is_fed_back_then_valid_pack_succeeds(sup: Supervisor) -> N
     assert "pack rejected" in roles.backend("thinker").prompts[1]
 
 
+def test_hypothesis_without_pack_gets_a_filled_template_nudge(sup: Supervisor) -> None:
+    """Observed with Qwen2.5-1.5B on Spark: the thinker states a good hypothesis,
+    leaves pack null, and a generic nudge does not move it. The nudge must hand
+    it a concrete pack (real parent checkpoint, its own claim) to edit."""
+    obs = _research(sup)
+    claim = "lr 1.5e-3 at 64 steps lowers confirm_ppl"
+    roles = Roles.scripted(
+        thinker=[_thought(hypotheses=[_hyp(claim)]), _thought(pack=_pack(obs))],
+        tooler=[],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    assert res.error is None and res.pack is not None
+    assert res.nudges == 1 and [h["claim"] for h in res.hypotheses] == [claim]
+
+    nudge = res.transcript[1].result["error"]
+    assert "does nothing until a pack" in nudge and claim in nudge
+    template = parse_json_object(nudge[nudge.index("{") :])
+    assert template["parent_checkpoint"] == (obs["last_checkpoint"] or obs["subject_checkpoint"])
+    assert template["hypothesis"] == claim
+    # the template is itself a valid pack, so "change one number" cannot fail validation
+    from lab.pack import ArtifactPack
+
+    ArtifactPack.from_dict(template)
+    assert nudge in roles.backend("thinker").prompts[1]
+
+
 def test_pack_with_hypothesis_id_key_is_accepted(sup: Supervisor) -> None:
     obs = _research(sup)
     pack = _pack(obs)

@@ -15,7 +15,13 @@ import json
 import threading
 import time
 
-from lab.ensemble.prompts import coder_prompt, thinker_prompt, tool_catalog, tooler_prompt
+from lab.ensemble.prompts import (
+    coder_prompt,
+    pack_nudge,
+    thinker_prompt,
+    tool_catalog,
+    tooler_prompt,
+)
 from lab.ensemble.protocol import CodeAction, Thought, Turn
 from lab.ensemble.roles import Roles
 from lab.ensemble.skills import skills_for_role
@@ -186,9 +192,7 @@ class Ensemble:
                         break
 
                     res.nudges += 1
-                    self._synthetic(
-                        res, r, "you must either request a tool/code, or emit a pack (or set done: true)."
-                    )
+                    self._synthetic(res, r, pack_nudge(obs, res.hypotheses))
                     span.set(outputs={"nudge": res.nudges})
                     if res.nudges >= MAX_NUDGES:
                         res.error = "thinker: no progress after 3 nudges"
