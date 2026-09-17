@@ -91,3 +91,35 @@ def test_read_hypothesis_allowed_after_halt(sup) -> None:
     out = sup.call("read_hypothesis")
     assert out["ok"] is True
     assert out["hypothesis"]["claim"]
+    listed = sup.call("list_hypotheses")
+    assert listed["ok"] is True
+    assert listed["hypotheses"][0]["id"] == out["id"]
+
+
+def test_each_write_hypothesis_opens_a_new_board_entry(sup) -> None:
+    """Refining a claim opens a second hypothesis; the newest becomes current."""
+    assert sup.call("enter_research")["ok"]
+    first = sup.call("write_hypothesis", {"claim": "v1", "why": "w", "falsify": "f"})
+    second = sup.call("write_hypothesis", {"claim": "v2 sharper", "why": "w", "falsify": "f"})
+    assert first["id"] == "hyp-0001" and second["id"] == "hyp-0002"
+    obs = sup.observe()
+    assert obs["hypothesis"]["id"] == second["id"]
+    assert [h["id"] for h in obs["hypotheses"]] == [first["id"], second["id"]]
+    assert sup.hypothesis.current.id == second["id"]
+    assert (sup.cfg.run_dir / "hypotheses" / "hyp-0002.json").is_file()
+    # The single-hypothesis mirror next to state.json tracks the current one.
+    assert (sup.cfg.run_dir / "hypothesis.json").is_file()
+    assert "v2 sharper" in (sup.cfg.run_dir / "hypothesis.json").read_text(encoding="utf-8")
+
+
+def test_pack_written_before_the_claim_still_arms_train(sup) -> None:
+    """Old single-hypothesis order (pack, then claim) must keep unlocking train."""
+    assert sup.call("enter_research")["ok"]
+    assert sup.call("write_pack", {"pack": dummy_pack(sup.observe())})["ok"]
+    assert sup.observe()["hypothesis"]["id"] == ""
+    wrote = sup.call("write_hypothesis", {"claim": "late claim", "why": "w", "falsify": "f"})
+    assert wrote["ok"]
+    hyp = sup.observe()["hypothesis"]
+    assert hyp["id"] == wrote["id"]
+    assert hyp["open_train"] == []
+    assert sup.call("enter_train")["ok"]

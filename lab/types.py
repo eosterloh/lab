@@ -36,11 +36,35 @@ ALWAYS_TOOLS = frozenset(
     {"read_notebook", "write_note", "write_beliefs", "halt"}
 )
 
-MEMORY_TOOLS = frozenset({"list_episodes", "read_episode", "read_hypothesis"})
+MEMORY_TOOLS = frozenset({"list_episodes", "read_episode", "read_hypothesis", "list_hypotheses"})
+
+# Read-only inspection tools from lab.tools_extra; safe in eval and research.
+INSPECT_TOOLS = frozenset(
+    {
+        "grep_files",
+        "list_models",
+        "inspect_model",
+        "read_checkpoint_meta",
+        "read_train_log",
+        "read_trace",
+        "list_packs",
+        "read_pack",
+        "diff_packs",
+        "list_jobs",
+        "read_skill",
+        "list_skills",
+        "read_episode_metrics",
+        "sandbox_usage",
+    }
+)
+
+# Extra research tools that write to the sandbox or run code.
+RESEARCH_EXTRA_TOOLS = frozenset({"run_python", "write_and_run", "data_stats"})
 
 PHASE_TOOLS: dict[Phase, frozenset[str]] = {
     Phase.EVAL: ALWAYS_TOOLS
     | MEMORY_TOOLS
+    | INSPECT_TOOLS
     | {
         "run_eval",
         "read_metrics",
@@ -49,6 +73,8 @@ PHASE_TOOLS: dict[Phase, frozenset[str]] = {
     },
     Phase.RESEARCH: ALWAYS_TOOLS
     | MEMORY_TOOLS
+    | INSPECT_TOOLS
+    | RESEARCH_EXTRA_TOOLS
     | {
         "list_files",
         "read_file",
@@ -66,5 +92,8 @@ PHASE_TOOLS: dict[Phase, frozenset[str]] = {
         "job_status",
         "cancel_job",
         "enter_eval",
+        "read_train_log",
+        "list_jobs",
+        "read_trace",
     },
 }

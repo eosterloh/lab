@@ -39,6 +39,11 @@ def make_card(ep: dict[str, Any]) -> str:
         f"- val_loss / val_ppl: {loss.get('val_loss')} / {loss.get('val_ppl')}",
         f"- trainer: {ep.get('trainer')}  config: `{json.dumps(cfg, sort_keys=True)}`",
         f"- pack: `{ep.get('pack_hash')}`  job: `{ep.get('job_id')}`",
+    ]
+    if ep.get("hypothesis_id"):
+        trial = f" (trial {ep['trial']})" if ep.get("trial") is not None else ""
+        lines.append(f"- hypothesis: `{ep['hypothesis_id']}`{trial}")
+    lines += [
         f"- parent: {ep.get('parent_checkpoint')}",
         f"- suite: {ep.get('eval_suite_id')} v{ep.get('eval_suite_version')}",
         "",
@@ -114,6 +119,8 @@ class EpisodeStore:
         pack_hash: str,
         job: Job,
         ev: dict[str, Any],
+        hypothesis_id: str | None = None,
+        trial: int | None = None,
     ) -> dict[str, Any]:
         if self.exists_for_job(job.id):
             for s in self.summaries(n=10_000):
@@ -127,6 +134,8 @@ class EpisodeStore:
             "title": title,
             "ts": _now(),
             "cycle": cycle,
+            "trial": trial,
+            "hypothesis_id": hypothesis_id,
             "hypothesis": pack.hypothesis,
             "trainer": pack.trainer,
             "config": pack.config,
@@ -157,6 +166,8 @@ class EpisodeStore:
             "title": title,
             "ts": ep["ts"],
             "cycle": cycle,
+            "trial": trial,
+            "hypothesis_id": hypothesis_id,
             "job_id": job.id,
             "job_status": job.status,
             "confirm_ppl": ev.get("confirm_ppl"),

@@ -79,25 +79,59 @@ def read_episode(sup: Any, args: Args) -> ToolResult:
 
 
 def read_hypothesis(sup: Any, args: Args) -> ToolResult:
-    return ok(hypothesis=sup.hypothesis.current.to_dict(), summary=sup.hypothesis.current.summary())
+    hyp_id = str(args.get("id") or "")
+    if hyp_id:
+        if not sup.board.has(hyp_id):
+            return err(f"unknown hypothesis {hyp_id}")
+        hyp = sup.board.get(hyp_id)
+    else:
+        hyp = sup.current_hypothesis
+    return ok(hypothesis=hyp.to_dict(), summary=hyp.summary(), id=hyp.id)
+
+
+def list_hypotheses(sup: Any, args: Args) -> ToolResult:
+    cycle = args.get("cycle")
+    status = args.get("status")
+    try:
+        rows = sup.board.summary(cycle=int(cycle) if cycle is not None else None)
+    except (TypeError, ValueError):
+        return err("cycle must be an integer")
+    if status:
+        rows = [r for r in rows if r["status"] == str(status)]
+    return ok(hypotheses=rows, cycle=sup.state.cycle, current_id=sup.state.hypothesis_id)
 
 
 def write_hypothesis(sup: Any, args: Args) -> ToolResult:
+    """Open a NEW hypothesis on the board (or update one when ``id`` is given)."""
     from lab.parse import _flatten_hypothesis_args
 
     args = _flatten_hypothesis_args(args)
+    hyp_id = str(args.get("id") or "")
     try:
-        hyp = sup.hypothesis.update(
-            claim=args.get("claim"),
-            why=args.get("why"),
-            falsify=args.get("falsify"),
+        if hyp_id:
+            if not sup.board.has(hyp_id):
+                return err(f"unknown hypothesis {hyp_id}")
+            hyp = sup.board.update(
+                hyp_id,
+                claim=args.get("claim"),
+                why=args.get("why"),
+                falsify=args.get("falsify"),
+                status=args.get("status"),
+            )
+            return ok(hypothesis=hyp.summary(), id=hyp.id)
+        claim = str(args.get("claim") or "").strip()
+        if not claim:
+            return err("claim is required")
+        hyp = sup.open_hypothesis(
+            claim=claim,
+            why=str(args.get("why") or ""),
+            falsify=str(args.get("falsify") or ""),
+            source=str(args.get("source") or "policy"),
             status=args.get("status"),
         )
     except Exception as e:
         return err(str(e))
-    if not hyp.claim:
-        return err("claim is required")
-    return ok(hypothesis=hyp.summary())
+    return ok(hypothesis=hyp.summary(), id=hyp.id)
 
 
 def enter_research(sup: Any, args: Args) -> ToolResult:
@@ -175,13 +209,27 @@ def prefetch_data(sup: Any, args: Args) -> ToolResult:
 
 
 def write_pack(sup: Any, args: Args) -> ToolResult:
+    args = dict(args)
+    # hypothesis_id links the pack to a board entry; the pack schema itself
+    # rejects unknown fields, so strip it wherever the model put it.
+    hypothesis_id = args.pop("hypothesis_id", None)
     payload = args.get("pack") or args
+    if isinstance(payload, dict) and "hypothesis_id" in payload:
+        payload = dict(payload)
+        hypothesis_id = hypothesis_id or payload.pop("hypothesis_id")
     try:
         pack = ArtifactPack.from_dict(payload if "hypothesis" in payload else args)
-        digest = sup.save_pack(pack)
-        return ok(pack_hash=digest, pack=pack.canonical())
+        digest = sup.save_pack(pack, hypothesis_id=str(hypothesis_id) if hypothesis_id else None)
+        return ok(pack_hash=digest, pack=pack.canonical(), hypothesis_id=sup.state.hypothesis_id)
     except Exception as e:
         return err(str(e))
+
+
+def queue_candidates(sup: Any, args: Args) -> ToolResult:
+    candidates = args.get("candidates")
+    if candidates is None:
+        return err("candidates is required: [{hypothesis_id, pack_hash}, ...]")
+    return sup.queue_candidates(candidates)
 
 
 def enter_train(sup: Any, args: Args) -> ToolResult:
@@ -217,6 +265,7 @@ REGISTRY: dict[str, Handler] = {
     "list_episodes": list_episodes,
     "read_episode": read_episode,
     "read_hypothesis": read_hypothesis,
+    "list_hypotheses": list_hypotheses,
     "write_hypothesis": write_hypothesis,
     "enter_research": enter_research,
     "list_files": list_files,
@@ -227,6 +276,7 @@ REGISTRY: dict[str, Handler] = {
     "web_search": web_search,
     "prefetch_data": prefetch_data,
     "write_pack": write_pack,
+    "queue_candidates": queue_candidates,
     "enter_train": enter_train,
     "job_status": job_status,
     "cancel_job": cancel_job,

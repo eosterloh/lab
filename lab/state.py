@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from lab.types import Phase
@@ -21,6 +21,21 @@ class RunState:
     last_metrics: dict[str, Any] | None = None
     gpu_held: bool = False
     halt_reason: str | None = None
+    # Multi-trial cycles: N candidate (hypothesis, pack) pairs are trained and
+    # evaluated in turn before the cycle number advances.
+    trial: int = 1
+    trials_planned: int = 1
+    # Candidates not yet loaded: [{"hypothesis_id": str, "pack_hash": str}, ...].
+    # The one under test lives in pack_hash / hypothesis_id, not here.
+    candidate_queue: list[dict[str, Any]] = field(default_factory=list)
+    hypothesis_id: str | None = None
+    # Sealed trials of the current cycle:
+    # [{"trial", "hypothesis_id", "pack_hash", "job_id", "confirm_ppl", ...}].
+    trial_results: list[dict[str, Any]] = field(default_factory=list)
+
+    def mid_trials(self) -> bool:
+        """True while a multi-trial cycle is in flight (trial > 1 or candidates queued)."""
+        return self.trial > 1 or bool(self.candidate_queue)
 
     def phase_enum(self) -> Phase:
         return Phase(self.phase)

@@ -30,6 +30,12 @@ class LabConfig:
     allow_network: bool = True
     gpu_lock_path: Path | None = None
     data_cache_dir: Path | None = None
+    thinker_model: Path | None = None
+    tooler_model: Path | None = None
+    coder_model: Path | None = None
+    models_dir: Path = Path.home() / "models"
+    ensembles_per_cycle: int = 3
+    ensemble_max_rounds: int = 12
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir).expanduser().resolve()
@@ -45,6 +51,13 @@ class LabConfig:
             self.data_cache_dir = default_cache_dir()
         else:
             self.data_cache_dir = Path(self.data_cache_dir).expanduser().resolve()
+        if self.thinker_model is not None:
+            self.thinker_model = Path(self.thinker_model).expanduser()
+        if self.tooler_model is not None:
+            self.tooler_model = Path(self.tooler_model).expanduser()
+        if self.coder_model is not None:
+            self.coder_model = Path(self.coder_model).expanduser()
+        self.models_dir = Path(self.models_dir).expanduser()
 
     @classmethod
     def from_env(cls, run_dir: Path) -> LabConfig:
@@ -58,6 +71,12 @@ class LabConfig:
             ),
             allow_network=os.environ.get("LAB_ALLOW_NETWORK", "1") != "0",
             data_cache_dir=_env_path("LAB_DATA_CACHE") or default_cache_dir(),
+            thinker_model=_env_path("LAB_THINKER_MODEL"),
+            tooler_model=_env_path("LAB_TOOLER_MODEL"),
+            coder_model=_env_path("LAB_CODER_MODEL"),
+            models_dir=_env_path("LAB_MODELS_DIR") or Path.home() / "models",
+            ensembles_per_cycle=int(os.environ.get("LAB_ENSEMBLES", "3")),
+            ensemble_max_rounds=int(os.environ.get("LAB_ENSEMBLE_ROUNDS", "12")),
         )
 
     @property
@@ -99,4 +118,8 @@ class LabConfig:
     @property
     def checkpoints_dir(self) -> Path:
         return self.run_dir / "checkpoints"
+
+    @property
+    def roles_path(self) -> Path:
+        return self.run_dir / "roles.json"
 

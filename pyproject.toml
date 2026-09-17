@@ -19,7 +19,7 @@ lab = "lab.cli:main"
 include = ["lab*"]
 
 [tool.setuptools.package-data]
-lab = ["train/corpus.txt", "data/frozen_eval/**"]
+lab = ["train/corpus.txt", "data/frozen_eval/**", "ensemble/skills/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

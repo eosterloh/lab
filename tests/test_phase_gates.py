@@ -26,6 +26,18 @@ def test_eval_phase_rejects_write_hypothesis(sup) -> None:
     assert "not allowed" in out["error"]
 
 
+def test_queue_candidates_is_research_only_but_list_hypotheses_is_memory(sup) -> None:
+    denied = sup.call("queue_candidates", {"candidates": []})
+    assert denied["ok"] is False
+    assert "not allowed" in denied["error"]
+    listed = sup.call("list_hypotheses")
+    assert listed["ok"] is True
+    assert listed["hypotheses"] == []
+    assert sup.call("enter_research")["ok"]
+    # Allowed now (empty list is the "drop the queue" escape hatch).
+    assert sup.call("queue_candidates", {"candidates": []})["ok"] is True
+
+
 def test_research_phase_allows_search_fetch_and_sandboxed_exec(sup, transport) -> None:
     assert sup.call("enter_research")["ok"]
     search = sup.call("web_search", {"query": "tinystories"})
