@@ -125,3 +125,31 @@ def test_report_on_a_run_with_no_trace_is_graceful(tmp_path: Path) -> None:
     summary = summarize(tmp_path)
     assert summary["spans"] == 0
     assert "No trace.jsonl" in markdown(summary)
+
+
+def test_parallel_spans_keep_their_own_nesting(tmp_path: Path) -> None:
+    """Worker threads (parallel ensembles) must parent to the main thread's open
+    span and never to each other's spans."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    path = tmp_path / "trace.jsonl"
+    tracer = Tracer(path, use_langsmith=False)
+
+    def worker(i: int) -> None:
+        with tracer.span(f"ensemble {i}", metadata={"ensemble": i}):
+            time.sleep(0.02)
+            with tracer.span(f"round {i}", metadata={"ensemble": i}):
+                time.sleep(0.02)
+
+    with tracer.span("research"):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(worker, range(3)))
+
+    rows = {r["name"]: r for r in _rows(path)}
+    assert len(rows) == 7
+    research = rows["research"]["id"]
+    for i in range(3):
+        assert rows[f"ensemble {i}"]["parent"] == research
+        assert rows[f"round {i}"]["parent"] == rows[f"ensemble {i}"]["id"]
+    assert len({r["id"] for r in rows.values()}) == 7

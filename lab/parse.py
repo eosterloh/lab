@@ -31,6 +31,34 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def parse_json_object(text: str) -> dict[str, Any] | None:
+    """Tolerant "one JSON object" parser for role replies.
+
+    Strips chat special tokens and code fences, then takes the slice from the
+    first ``{`` to the last ``}``. If that is not valid JSON, falls back to the
+    balanced-brace scan in ``extract_json_object``. Returns None when no JSON
+    object can be recovered.
+    """
+    if not isinstance(text, str):
+        return None
+    cleaned = (
+        text.replace("<|im_end|>", "")
+        .replace("<|im_start|>", "")
+        .replace("<|endoftext|>", "")
+    )
+    fenced = re.search(r"```(?:json|JSON)?\s*(\{.*\})\s*```", cleaned, re.DOTALL)
+    blob = fenced.group(1) if fenced else cleaned
+    start = blob.find("{")
+    end = blob.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(blob[start : end + 1])
+    except json.JSONDecodeError:
+        return extract_json_object(cleaned)
+    return data if isinstance(data, dict) else extract_json_object(cleaned)
+
+
 def parse_tool_call(text: str) -> tuple[str, dict[str, Any]] | None:
     data = extract_json_object(text)
     if not data:

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 import json
 import os
+import threading
 import time
 
 # LangSmith run types that render usefully in the UI.
@@ -86,9 +87,31 @@ class Tracer:
         self.project = project or os.environ.get("LANGSMITH_PROJECT") or "lab-harness"
         self.use_langsmith = langsmith_enabled() if use_langsmith is None else use_langsmith
         self._seq = 0
-        self._open: list[int] = []
+        self._lock = threading.Lock()
+        # One open-span stack per thread. Parallel ensembles each keep their own
+        # nesting; a worker thread's outermost span parents to whatever the main
+        # thread had open when it started (the cycle / step span).
+        self._local = threading.local()
+        self._main_thread = threading.get_ident()
+        self._main_open: list[int] = []
         self._cycle_stack = ExitStack()
         self._cycle: int | None = None
+
+    @property
+    def _open(self) -> list[int]:
+        if threading.get_ident() == self._main_thread:
+            return self._main_open
+        stack = getattr(self._local, "open", None)
+        if stack is None:
+            stack = self._local.open = []
+        return stack
+
+    def _parent(self) -> int | None:
+        if self._open:
+            return self._open[-1]
+        if threading.get_ident() != self._main_thread and self._main_open:
+            return self._main_open[-1]
+        return None
 
     @contextmanager
     def span(
@@ -99,9 +122,10 @@ class Tracer:
         inputs: Any = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[Span]:
-        self._seq += 1
-        span_id = self._seq
-        parent = self._open[-1] if self._open else None
+        with self._lock:
+            self._seq += 1
+            span_id = self._seq
+        parent = self._parent()
         span = Span(name, kind, metadata or {})
         started = time.time()
         stack = ExitStack()
@@ -178,7 +202,8 @@ class Tracer:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, default=str) + "\n")
+            line = json.dumps(row, default=str) + "\n"
+            with self._lock, self.path.open("a", encoding="utf-8") as f:
+                f.write(line)
         except Exception:
             pass
