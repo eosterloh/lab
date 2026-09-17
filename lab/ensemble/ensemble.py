@@ -18,6 +18,7 @@ import time
 from lab.ensemble.prompts import (
     coder_prompt,
     pack_nudge,
+    pack_template,
     thinker_prompt,
     tool_catalog,
     tooler_prompt,
@@ -146,6 +147,7 @@ class Ensemble:
             index=i, hypotheses=[], pack=None, rounds=0, tool_calls=0, code_runs=0, transcript=[]
         )
         last_call: tuple[str, str] | None = None
+        template_nudged = False
         try:
             for r in range(1, self.cfg.max_rounds + 1):
                 res.rounds = r
@@ -160,6 +162,19 @@ class Ensemble:
 
                     if thought.pack is not None:
                         pack_err = self._validate_pack(thought.pack)
+                        if pack_err is None and not template_nudged and self._is_template(thought.pack, obs):
+                            # Small models sometimes hand the nudge template back
+                            # verbatim; ask once for the edit the claim promised.
+                            template_nudged = True
+                            res.nudges += 1
+                            self._synthetic(
+                                res,
+                                r,
+                                "your pack is the template unchanged. Apply the change your claim names "
+                                "(e.g. set config.lr or config.steps to the value in your hypothesis) and emit it again.",
+                            )
+                            span.set(outputs={"pack_error": "template unchanged"})
+                            continue
                         if pack_err is None:
                             res.pack = _strip_pack(thought.pack)
                             res.done = True
@@ -393,6 +408,12 @@ class Ensemble:
                 continue
             seen.add(key)
             res.hypotheses.append(dict(h))
+
+    @staticmethod
+    def _is_template(pack: dict[str, Any], obs: dict[str, Any]) -> bool:
+        """True when the pack's experimental content equals the nudge template."""
+        tpl = pack_template(obs)
+        return pack.get("config") == tpl["config"] and pack.get("data_manifest") == tpl["data_manifest"]
 
     @staticmethod
     def _validate_pack(pack: dict[str, Any]) -> str | None:

@@ -10,9 +10,10 @@ Exactly these fields; unknown keys are rejected:
  "data_manifest": {"sources": ["hf:roneneldan/TinyStories:train:10000"]},
  "eval_suite_id": "core",
  "eval_suite_version": 1,
- "parent_checkpoint": "runs/x/checkpoints/latest.pt",
+ "parent_checkpoint": "subjects/tinytrain-8m",
  "budgets": {"max_hours": 0.1, "max_steps": 64}}
 ```
+`parent_checkpoint` must be copied from the observation: `last_checkpoint` when set, else `subject_checkpoint`. Never invent a path.
 Rules: `hypothesis` non-empty; `trainer` in `dummy | lab | tinytrain`; `config` non-empty object; `eval_suite_id` = `core`, `eval_suite_version` = 1; `parent_checkpoint` non-empty string; `budgets.max_hours` in (0, 3.5]; lab: `hidden % heads == 0`; tinytrain: `config.command` argv list required. The pack hash is sha256 of the canonical JSON; same content = same hash = same job.
 
 ## Trainers

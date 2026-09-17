@@ -244,6 +244,31 @@ def test_hypothesis_without_pack_gets_a_filled_template_nudge(sup: Supervisor) -
     assert nudge in roles.backend("thinker").prompts[1]
 
 
+def test_template_returned_verbatim_is_sent_back_once(sup: Supervisor) -> None:
+    """Observed on Spark: after the template nudge the 1.5B thinker claimed
+    'lr 1.5e-3' but returned the template with lr untouched. One more nudge
+    asks for the edit; if it insists, the pack is accepted (never loop)."""
+    from lab.ensemble.prompts import pack_template
+
+    obs = _research(sup)
+    tpl = pack_template(obs, "lr 1.5e-3 lowers confirm_ppl")
+    edited = dict(tpl, config=dict(tpl["config"], lr=0.0015))
+    roles = Roles.scripted(
+        thinker=[_thought(hypotheses=[_hyp("lr 1.5e-3")]), _thought(pack=tpl), _thought(pack=edited)],
+        tooler=[],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    assert res.error is None and res.pack["config"]["lr"] == 0.0015
+    assert res.rounds == 3 and res.nudges == 2
+    assert "template unchanged" in res.transcript[3].result["error"]
+
+    # a stubborn thinker is nudged only once, then its template pack is taken
+    sup2_roles = Roles.scripted(thinker=[_thought(pack=tpl), _thought(pack=tpl)], tooler=[], coder=[])
+    res2 = _ens(sup, sup2_roles).run(obs)
+    assert res2.error is None and res2.pack is not None and res2.rounds == 2
+
+
 def test_pack_with_hypothesis_id_key_is_accepted(sup: Supervisor) -> None:
     obs = _research(sup)
     pack = _pack(obs)
