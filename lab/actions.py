@@ -232,3 +232,7 @@ REGISTRY: dict[str, Handler] = {
     "cancel_job": cancel_job,
     "enter_eval": enter_eval,
 }
+
+from lab.tools_extra import EXTRA_REGISTRY  # noqa: E402
+
+REGISTRY.update(EXTRA_REGISTRY)
