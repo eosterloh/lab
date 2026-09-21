@@ -17,11 +17,14 @@ import time
 
 from lab.ensemble.prompts import (
     coder_prompt,
+    coerce_config_numbers,
     knob_for_hint,
     pack_fill_prompt,
     pack_nudge,
+    pack_tests_claim,
     pack_template,
     placeholder_fields,
+    ungrounded_ppl,
     thinker_prompt,
     tool_catalog,
     tooler_prompt,
@@ -165,7 +168,8 @@ class Ensemble:
                     self._absorb_hypotheses(thought, res)
 
                     if thought.pack is not None:
-                        pack_err = self._validate_pack(thought.pack)
+                        claim = res.hypotheses[-1]["claim"] if res.hypotheses else None
+                        checked, pack_err = self._validate_pack(thought.pack, claim=claim, obs=obs)
                         if pack_err is None and not self._template_nudged and self._is_template(thought.pack, obs):
                             # Small models sometimes hand the nudge template back
                             # verbatim; ask once for the edit the claim promised.
@@ -180,7 +184,7 @@ class Ensemble:
                             span.set(outputs={"pack_error": "template unchanged"})
                             continue
                         if pack_err is None:
-                            res.pack = _strip_pack(thought.pack)
+                            res.pack = _strip_pack(checked)
                             res.done = True
                             span.set(outputs={"pack": True})
                             break
@@ -412,7 +416,10 @@ class Ensemble:
         prompt = pack_fill_prompt(obs, claim, knob=self._knob, skills=self._skills["thinker"])
         raw, ms = self._generate("thinker", prompt, obs, r)
         pack = parse_json_object(raw)
-        err = "reply was not a JSON object" if pack is None else self._validate_pack(pack)
+        if pack is None:
+            err: str | None = "reply was not a JSON object"
+        else:
+            pack, err = self._validate_pack(pack, claim=claim, obs=obs)
         if err is None and not self._template_nudged and self._is_template(pack, obs):
             self._template_nudged = True
             err = "that is the template unchanged; apply the change your claim names"
@@ -451,20 +458,42 @@ class Ensemble:
         tpl = pack_template(obs, knob=self._knob)
         return pack.get("config") == tpl["config"] and pack.get("data_manifest") == tpl["data_manifest"]
 
-    def _validate_pack(self, pack: dict[str, Any]) -> str | None:
+    def _validate_pack(
+        self,
+        pack: dict[str, Any],
+        *,
+        claim: str | None = None,
+        obs: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str | None]:
+        """Check a pack, returning it normalized plus the first problem found.
+
+        Beyond the schema this asks the two questions the schema cannot: are
+        the numbers actually numbers, and does the experiment test the claim
+        it was written for.
+        """
         # A placeholder left in place means the model copied the example
-        # instead of answering it. Catch it here: config values are not
-        # type-checked downstream, so a string lr would reach the trainer.
+        # instead of answering it.
         stale = placeholder_fields(pack)
         if stale:
-            return (
+            return pack, (
                 f"{', '.join(stale)} still holds a placeholder. Replace it with the value your claim names."
             )
+        pack, err = coerce_config_numbers(pack)
+        if err:
+            return pack, err
         try:
             ArtifactPack.from_dict(_strip_pack(pack))
         except (ValueError, TypeError, KeyError) as e:
-            return str(e)
-        return None
+            return pack, str(e)
+        if claim:
+            mismatch = pack_tests_claim(pack, claim, self._knob)
+            if mismatch:
+                return pack, mismatch
+            if obs is not None:
+                bogus = ungrounded_ppl(claim, obs)
+                if bogus:
+                    return pack, bogus
+        return pack, None
 
     def _under_prefix(self, path: str) -> str:
         prefix = self.cfg.sandbox_prefix

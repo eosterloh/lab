@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 import json
+import re
 
 from lab.data_cache import DEFAULT_MIX
 from lab.ensemble.protocol import Turn
@@ -252,6 +253,89 @@ def pack_nudge(
     return lead + f'Reply again with the same JSON shape, with "pack" set to:\n{template}\n{tail}'
 
 
+NUMERIC_CONFIG_KEYS = ("lr", "steps", "hidden", "layers", "heads", "seq_len", "batch")
+_ARROW = re.compile(r"(-+>|→)\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)")
+_PPL = re.compile(r"confirm_ppl[^0-9]{0,4}([0-9]+\.?[0-9]*)")
+
+
+def coerce_config_numbers(pack: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Make numeric config values numbers, or say which one cannot be.
+
+    Nothing downstream type-checks `config`, so a quoted number reaches the
+    trainer as a string (observed: `"lr": "0.01"` on Spark). Intent is
+    unambiguous, so coerce what parses and refuse what does not.
+    """
+    config = dict(pack.get("config") or {})
+    for key in NUMERIC_CONFIG_KEYS:
+        value = config.get(key)
+        if value is None or isinstance(value, (int, float)) and not isinstance(value, bool):
+            continue
+        try:
+            number = float(str(value))
+        except (TypeError, ValueError):
+            return pack, f"config.{key} is {value!r}, which is not a number"
+        config[key] = number if key == "lr" else int(number)
+    return dict(pack, config=config), None
+
+
+def claim_target(claim: str) -> float | None:
+    """The value a claim promises to move to, from its `old->new` form."""
+    matches = _ARROW.findall(claim or "")
+    if not matches:
+        return None
+    try:
+        return float(matches[0][1])
+    except ValueError:
+        return None
+
+
+def pack_tests_claim(pack: dict[str, Any], claim: str, knob: str | None) -> str | None:
+    """Refuse a pack whose knob is not the value its own claim names."""
+    if not knob:
+        return None
+    target = claim_target(claim)
+    if target is None:
+        return None
+    actual = (pack.get("config") or {}).get(knob)
+    if not isinstance(actual, (int, float)) or isinstance(actual, bool):
+        return None
+    if abs(float(actual) - target) <= 1e-12:
+        return None
+    return (
+        f'your claim says {knob} -> {target:g}, but config.{knob} is {actual:g}. '
+        f"Set config.{knob} to {target:g}, the value you are testing."
+    )
+
+
+def observed_ppls(obs: dict[str, Any]) -> set[float]:
+    """Every confirm_ppl a claim could honestly cite."""
+    out: set[float] = set()
+    for ep in obs.get("episodes") or []:
+        value = (ep.get("eval") or {}).get("confirm_ppl", ep.get("confirm_ppl"))
+        if isinstance(value, (int, float)):
+            out.add(round(float(value), 4))
+    last = (obs.get("last_eval") or {}).get("confirm_ppl")
+    if isinstance(last, (int, float)):
+        out.add(round(float(last), 4))
+    return out
+
+
+def ungrounded_ppl(claim: str, obs: dict[str, Any]) -> str | None:
+    """Refuse a claim citing a confirm_ppl that is in no episode of this run."""
+    cited = [float(m) for m in _PPL.findall(claim or "")]
+    if not cited:
+        return None
+    known = observed_ppls(obs)
+    bogus = [c for c in cited if not any(abs(c - k) <= 0.01 for k in known)]
+    if not bogus:
+        return None
+    listed = ", ".join(f"{v:g}" for v in sorted(known)) or "none yet"
+    return (
+        f"confirm_ppl {bogus[0]:g} appears in no episode of this run. "
+        f"Cite one of these or drop the number: {listed}."
+    )
+
+
 def pack_fill_prompt(
     obs: dict[str, Any],
     claim: str,
@@ -390,9 +474,14 @@ __all__ = [
     "PLACEHOLDER",
     "TOOL_SCHEMAS",
     "VARIANT_HINTS",
+    "claim_target",
     "coder_prompt",
+    "coerce_config_numbers",
     "knob_for_hint",
     "obs_digest",
+    "observed_ppls",
+    "pack_tests_claim",
+    "ungrounded_ppl",
     "pack_fill_prompt",
     "pack_nudge",
     "pack_template",

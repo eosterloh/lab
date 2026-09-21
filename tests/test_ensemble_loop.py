@@ -277,7 +277,7 @@ def test_a_hypothesis_without_a_pack_triggers_a_focused_fill_turn(sup: Superviso
     from lab.ensemble.prompts import pack_template
 
     obs = _research(sup)
-    claim = "steps 64->128, vs ep-0001 (confirm_ppl 198.3); expect lower"
+    claim = "steps 64->128 vs the parent; expect lower"
     filled = pack_template(obs, claim, knob="steps")
     filled["config"]["steps"] = 128
     roles = Roles.scripted(
@@ -317,6 +317,60 @@ def test_a_fill_turn_that_keeps_the_placeholder_is_refused(sup: Supervisor) -> N
     errors = [str(t.result.get("error", "")) for t in res.transcript if t.result]
     assert any("config.steps still holds a placeholder" in e for e in errors)
     assert any("not a JSON object" in e for e in errors)
+
+
+def test_a_quoted_number_is_coerced_not_passed_to_the_trainer(sup: Supervisor) -> None:
+    """Observed on Spark: the thinker emitted `"lr": "0.01"` and the string
+    reached the job's pack.json. Nothing downstream type-checks config."""
+    from lab.ensemble.prompts import coerce_config_numbers
+
+    obs = _research(sup)
+    pack = _pack(obs)
+    pack["config"] |= {"lr": "0.01", "steps": "128"}
+    fixed, err = coerce_config_numbers(pack)
+    assert err is None and fixed["config"]["lr"] == 0.01 and fixed["config"]["steps"] == 128
+    assert isinstance(fixed["config"]["steps"], int)
+
+    _, err = coerce_config_numbers(dict(pack, config={"lr": "fast"}))
+    assert err is not None and "not a number" in err
+
+    roles = Roles.scripted(thinker=[_thought(pack=pack)], tooler=[], coder=[])
+    res = _ens(sup, roles).run(obs)
+    assert res.pack["config"]["lr"] == 0.01
+
+
+def test_a_pack_that_does_not_test_its_claim_is_refused(sup: Supervisor) -> None:
+    """Observed on Spark: claim 'lr 0.01->0.001' shipped with config.lr 0.01,
+    the value it was meant to move away from."""
+    from lab.ensemble.prompts import claim_target, pack_tests_claim
+
+    obs = _research(sup)
+    assert claim_target("lr 0.01->0.001 at hidden 32") == 0.001
+    assert claim_target("steps 64 -> 128") == 128.0
+    assert claim_target("make it better") is None
+
+    pack = _pack(obs)
+    pack["config"]["lr"] = 0.01
+    err = pack_tests_claim(pack, "lr 0.01->0.001", "lr")
+    assert err and "config.lr is 0.01" in err and "Set config.lr to 0.001" in err
+    assert pack_tests_claim(pack, "lr 0.01->0.001", None) is None  # angle has no knob
+    pack["config"]["lr"] = 0.001
+    assert pack_tests_claim(pack, "lr 0.01->0.001", "lr") is None
+
+
+def test_a_claim_citing_a_confirm_ppl_from_nowhere_is_refused(sup: Supervisor) -> None:
+    """Observed on Spark: 'vs baseline ep (confirm_ppl 0.85)' in a run whose
+    only episode scored 198.26. A claim measured against a number that does
+    not exist cannot be falsified by the episode that follows it."""
+    from lab.ensemble.prompts import observed_ppls, ungrounded_ppl
+
+    obs = dict(_research(sup), episodes=[{"confirm_ppl": 198.2647}], last_eval={"confirm_ppl": 198.2647})
+    assert observed_ppls(obs) == {198.2647}
+
+    err = ungrounded_ppl("lr 0.01->0.001, vs baseline ep (confirm_ppl 0.85)", obs)
+    assert err and "0.85 appears in no episode" in err and "198.265" in err
+    assert ungrounded_ppl("lr 0.01->0.001 vs ep-0001 (confirm_ppl 198.26)", obs) is None
+    assert ungrounded_ppl("lr 0.01->0.001, expect lower", obs) is None
 
 
 def test_a_placeholder_pack_never_reaches_the_supervisor(sup: Supervisor) -> None:
