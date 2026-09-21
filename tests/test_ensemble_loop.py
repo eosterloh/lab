@@ -405,6 +405,44 @@ def test_every_problem_with_a_pack_is_reported_at_once(sup: Supervisor) -> None:
     assert "Set config.lr to 0.001" in refusal and "nothing has been scored" in refusal
 
 
+def test_the_last_arrow_in_a_claim_is_the_target(sup: Supervisor) -> None:
+    """Observed on Spark: 'config.lr -> 0.0005->0.001' is the model naming the
+    key before the transition. Reading the first arrow made 0.0005 the target,
+    so a pack that changed nothing passed the check."""
+    from lab.ensemble.prompts import claim_target, pack_tests_claim
+
+    assert claim_target("config.lr -> 0.0005->0.001") == 0.001
+    assert claim_target("lr 0.01->0.001") == 0.001
+
+    pack = _pack(_research(sup))
+    pack["config"]["lr"] = 0.0005
+    err = pack_tests_claim(pack, "config.lr -> 0.0005->0.001", "lr")
+    assert err and "Set config.lr to 0.001" in err
+
+
+def test_a_claim_with_an_unfilled_slot_never_becomes_an_episode_title(sup: Supervisor) -> None:
+    """Observed on Spark: 'vs baseline ep (confirm_ppl <ppl>)' was accepted and
+    carried into the episode id. The claim is what the run is judged against."""
+    from lab.ensemble.prompts import placeholder_in_text
+
+    assert placeholder_in_text("steps 64->128, vs baseline ep (confirm_ppl <ppl>)")
+    assert placeholder_in_text("steps 64->128 vs ep-0001 (confirm_ppl 16.5)") is None
+
+    obs = _research(sup)
+    good = _hyp("steps 64->128 vs the parent")
+    roles = Roles.scripted(
+        thinker=[
+            _thought(hypotheses=[_hyp("steps 64->128, vs baseline ep (confirm_ppl <ppl>)")]),
+            _thought(hypotheses=[good], pack=_pack(obs, steps=128)),
+        ],
+        tooler=[],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    assert [h["claim"] for h in res.hypotheses] == [good["claim"]]
+    assert "still contains the slot <ppl>" in res.transcript[1].result["error"]
+
+
 def test_an_arrow_in_a_config_value_is_read_as_its_target(sup: Supervisor) -> None:
     """Observed on Spark: `"steps": "64->128"`, the claim's notation leaking
     into the value. The intent is the target."""

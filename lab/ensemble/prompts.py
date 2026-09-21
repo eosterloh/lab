@@ -283,15 +283,35 @@ def coerce_config_numbers(pack: dict[str, Any]) -> tuple[dict[str, Any], str | N
     return dict(pack, config=config), None
 
 
+_TEXT_PLACEHOLDER = re.compile(r"<[A-Za-z_][A-Za-z0-9_ ]{0,24}>")
+
+
 def claim_target(claim: str) -> float | None:
-    """The value a claim promises to move to, from its `old->new` form."""
+    """The value a claim promises to move to, from its `old->new` form.
+
+    The last arrow wins: "config.lr -> 0.0005->0.001" is a model restating the
+    key before the transition, and its target is 0.001. Taking the first match
+    read that claim as moving *to* 0.0005, which let a pack that changed
+    nothing pass the check (observed on Spark, cycle 2).
+    """
     matches = _ARROW.findall(claim or "")
     if not matches:
         return None
     try:
-        return float(matches[0][1])
+        return float(matches[-1][1])
     except ValueError:
         return None
+
+
+def placeholder_in_text(text: str) -> str | None:
+    """Refuse prose still carrying a slot, e.g. 'vs baseline ep (confirm_ppl <ppl>)'."""
+    found = _TEXT_PLACEHOLDER.search(text or "")
+    if not found:
+        return None
+    return (
+        f"your claim still contains the slot {found.group(0)}. Replace it with a real value "
+        "from the observation, or remove that part of the sentence."
+    )
 
 
 def pack_tests_claim(pack: dict[str, Any], claim: str, knob: str | None) -> str | None:
@@ -505,6 +525,7 @@ __all__ = [
     "obs_digest",
     "observed_ppls",
     "pack_tests_claim",
+    "placeholder_in_text",
     "ungrounded_ppl",
     "pack_fill_prompt",
     "pack_nudge",

@@ -24,6 +24,7 @@ from lab.ensemble.prompts import (
     pack_tests_claim,
     pack_template,
     placeholder_fields,
+    placeholder_in_text,
     ungrounded_ppl,
     thinker_prompt,
     tool_catalog,
@@ -165,7 +166,7 @@ class Ensemble:
                         res.error = "thinker: unparseable"
                         span.set(outputs={"error": res.error})
                         break
-                    self._absorb_hypotheses(thought, res)
+                    absorb_err = self._absorb_hypotheses(thought, res)
 
                     if thought.pack is not None:
                         claim = res.hypotheses[-1]["claim"] if res.hypotheses else None
@@ -215,6 +216,13 @@ class Ensemble:
                         break
 
                     res.nudges += 1
+                    if absorb_err:
+                        self._synthetic(res, r, absorb_err)
+                        span.set(outputs={"nudge": res.nudges, "why": "placeholder claim"})
+                        if res.nudges >= MAX_NUDGES:
+                            res.error = "thinker: no progress after 3 nudges"
+                            break
+                        continue
                     if res.hypotheses and self._fill_pack(obs, res, r):
                         span.set(outputs={"pack": True, "via": "fill"})
                         break
@@ -444,14 +452,28 @@ class Ensemble:
 
     # -------------------------------------------------------------- helpers
 
-    def _absorb_hypotheses(self, thought: Thought, res: EnsembleResult) -> None:
+    def _absorb_hypotheses(self, thought: Thought, res: EnsembleResult) -> str | None:
+        """Take the usable claims; say why if a stated one was thrown away.
+
+        A claim becomes the episode title and the thing the run is judged
+        against, so one with an unfilled slot in it is worse than none.
+        """
         seen = {h["claim"].strip().lower() for h in res.hypotheses}
+        refused: str | None = None
+        added = 0
         for h in thought.hypotheses:
-            key = h["claim"].strip().lower()
+            claim = h["claim"]
+            slot = placeholder_in_text(claim)
+            if slot:
+                refused = slot
+                continue
+            key = claim.strip().lower()
             if key in seen or len(res.hypotheses) >= MAX_HYPOTHESES:
                 continue
             seen.add(key)
             res.hypotheses.append(dict(h))
+            added += 1
+        return refused if added == 0 else None
 
     def _is_template(self, pack: dict[str, Any], obs: dict[str, Any]) -> bool:
         """True when the pack's experimental content equals the nudge template."""
@@ -489,6 +511,7 @@ class Ensemble:
         # its first mistake, the thinker fixed that one, tripped the next, and
         # spent its whole nudge budget alternating between two.
         problems = []
+        problems.append(placeholder_in_text(str(pack.get("hypothesis") or "")))
         if claim:
             problems.append(pack_tests_claim(pack, claim, self._knob))
             if obs is not None:
