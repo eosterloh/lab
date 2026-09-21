@@ -273,7 +273,12 @@ def coerce_config_numbers(pack: dict[str, Any]) -> tuple[dict[str, Any], str | N
         try:
             number = float(str(value))
         except (TypeError, ValueError):
-            return pack, f"config.{key} is {value!r}, which is not a number"
+            # "64->128" is the claim's own notation leaking into the value.
+            # The intent is the target, so take it rather than burn a round.
+            arrow = claim_target(str(value))
+            if arrow is None:
+                return pack, f"config.{key} is {value!r}, which is not a number"
+            number = arrow
         config[key] = number if key == "lr" else int(number)
     return dict(pack, config=config), None
 
@@ -329,10 +334,25 @@ def ungrounded_ppl(claim: str, obs: dict[str, Any]) -> str | None:
     bogus = [c for c in cited if not any(abs(c - k) <= 0.01 for k in known)]
     if not bogus:
         return None
-    listed = ", ".join(f"{v:g}" for v in sorted(known)) or "none yet"
+    if not known:
+        return (
+            f"drop 'confirm_ppl {bogus[0]:g}' from your claim: nothing has been scored in this run yet, "
+            "so there is no number to compare against. Say you expect lower than the parent instead."
+        )
+    listed = ", ".join(f"{v:g}" for v in sorted(known))
     return (
         f"confirm_ppl {bogus[0]:g} appears in no episode of this run. "
         f"Cite one of these or drop the number: {listed}."
+    )
+
+
+def cold_start_rule(obs: dict[str, Any]) -> str:
+    """The line to add before any episode has been scored."""
+    if observed_ppls(obs):
+        return ""
+    return (
+        "- No episode has been scored in this run yet. Do not cite a confirm_ppl number; "
+        "compare against the parent checkpoint and say you expect lower.\n"
     )
 
 
@@ -361,6 +381,8 @@ def pack_fill_prompt(
         f"Your claim: {claim}\n"
         f"Pack:\n{template}\n"
         f"{task}\n"
+        + cold_start_rule(obs)
+        +
         "Reply with ONLY the pack as one JSON object, starting with { and ending with }. "
         "No prose, no markdown fence, no other fields.\n\n"
         f"observation:\n{obs_digest(obs, max_chars=1200)}\n"
@@ -403,6 +425,7 @@ def thinker_prompt(
         f"{example}\n"
         "Rules:\n"
         + knob_rule
+        + cold_start_rule(obs)
         + "- Numbers and claims in the reference material are illustrations from other runs. Never copy one; "
         "read the episodes in your observation and choose your own.\n"
         "- parent_checkpoint = observation.last_checkpoint when set, else subject_checkpoint.\n"
@@ -476,6 +499,7 @@ __all__ = [
     "VARIANT_HINTS",
     "claim_target",
     "coder_prompt",
+    "cold_start_rule",
     "coerce_config_numbers",
     "knob_for_hint",
     "obs_digest",

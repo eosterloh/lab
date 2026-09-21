@@ -373,6 +373,47 @@ def test_a_claim_citing_a_confirm_ppl_from_nowhere_is_refused(sup: Supervisor) -
     assert ungrounded_ppl("lr 0.01->0.001, expect lower", obs) is None
 
 
+def test_cycle_one_asks_for_no_ppl_instead_of_an_impossible_citation(sup: Supervisor) -> None:
+    """Observed on Spark: in cycle 1 nothing is scored yet, so every cited
+    number was refused with 'cite one of these: none yet' -- an instruction
+    the model cannot follow. Say what to do instead, and say it up front."""
+    from lab.ensemble.prompts import cold_start_rule, pack_fill_prompt, ungrounded_ppl
+
+    cold = dict(_research(sup), episodes=[], last_eval=None)
+    err = ungrounded_ppl("lr 0.01->0.001 vs baseline (confirm_ppl 0.85)", cold)
+    assert err and "nothing has been scored in this run yet" in err and "none yet" not in err
+
+    assert "Do not cite a confirm_ppl" in cold_start_rule(cold)
+    assert cold_start_rule(dict(cold, episodes=[{"confirm_ppl": 12.0}])) == ""
+    assert "Do not cite a confirm_ppl" in pack_fill_prompt(cold, "lr->0.001", knob="lr")
+    assert "Do not cite a confirm_ppl" in thinker_prompt(
+        cold, [], variant_hint="learning rate", skills=""
+    )
+
+
+def test_every_problem_with_a_pack_is_reported_at_once(sup: Supervisor) -> None:
+    """Told only its first mistake, the thinker fixed that and tripped the
+    next, burning all three nudges on two alternating errors."""
+    obs = dict(_research(sup), episodes=[], last_eval=None)
+    claim = "lr 0.01->0.001, vs baseline ep (confirm_ppl 0.85)"
+    bad = _pack(obs)
+    bad["config"]["lr"] = 0.01
+    roles = Roles.scripted(thinker=[_thought(hypotheses=[_hyp(claim)], pack=bad)], tooler=[], coder=[])
+    res = _ens(sup, roles, variant_hint="learning rate").run(obs)
+
+    refusal = res.transcript[1].result["error"]
+    assert "Set config.lr to 0.001" in refusal and "nothing has been scored" in refusal
+
+
+def test_an_arrow_in_a_config_value_is_read_as_its_target(sup: Supervisor) -> None:
+    """Observed on Spark: `"steps": "64->128"`, the claim's notation leaking
+    into the value. The intent is the target."""
+    from lab.ensemble.prompts import coerce_config_numbers
+
+    fixed, err = coerce_config_numbers({"config": {"steps": "64->128", "lr": "0.001"}})
+    assert err is None and fixed["config"]["steps"] == 128 and fixed["config"]["lr"] == 0.001
+
+
 def test_a_placeholder_pack_never_reaches_the_supervisor(sup: Supervisor) -> None:
     """Config values are not type-checked downstream, so a placeholder string
     would otherwise reach the trainer as an lr."""

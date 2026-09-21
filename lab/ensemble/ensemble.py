@@ -485,15 +485,16 @@ class Ensemble:
             ArtifactPack.from_dict(_strip_pack(pack))
         except (ValueError, TypeError, KeyError) as e:
             return pack, str(e)
+        # Report every remaining problem at once. Observed on Spark: told only
+        # its first mistake, the thinker fixed that one, tripped the next, and
+        # spent its whole nudge budget alternating between two.
+        problems = []
         if claim:
-            mismatch = pack_tests_claim(pack, claim, self._knob)
-            if mismatch:
-                return pack, mismatch
+            problems.append(pack_tests_claim(pack, claim, self._knob))
             if obs is not None:
-                bogus = ungrounded_ppl(claim, obs)
-                if bogus:
-                    return pack, bogus
-        return pack, None
+                problems.append(ungrounded_ppl(claim, obs))
+        found = [p for p in problems if p]
+        return pack, (" Also: ".join(found) if found else None)
 
     def _under_prefix(self, path: str) -> str:
         prefix = self.cfg.sandbox_prefix
