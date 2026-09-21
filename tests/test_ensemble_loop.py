@@ -218,31 +218,29 @@ def test_invalid_pack_is_fed_back_then_valid_pack_succeeds(sup: Supervisor) -> N
     assert "pack rejected" in roles.backend("thinker").prompts[1]
 
 
-def test_hypothesis_without_pack_gets_a_filled_template_nudge(sup: Supervisor) -> None:
-    """Observed with Qwen2.5-1.5B on Spark: the thinker states a good hypothesis,
-    leaves pack null, and a generic nudge does not move it. The nudge must hand
-    it a concrete pack (real parent checkpoint, its own claim) to edit."""
+def test_a_thinker_with_no_hypothesis_still_gets_the_template_nudge(sup: Supervisor) -> None:
+    """With a hypothesis the harness runs a focused fill turn; with nothing at
+    all there is nothing to fill from, so the nudge carries the template."""
     obs = _research(sup)
-    claim = "lr 1.5e-3 at 64 steps lowers confirm_ppl"
-    roles = Roles.scripted(
-        thinker=[_thought(hypotheses=[_hyp(claim)]), _thought(pack=_pack(obs))],
-        tooler=[],
-        coder=[],
-    )
+    roles = Roles.scripted(thinker=[_thought(), _thought(pack=_pack(obs))], tooler=[], coder=[])
     res = _ens(sup, roles).run(obs)
-    assert res.error is None and res.pack is not None
-    assert res.nudges == 1 and [h["claim"] for h in res.hypotheses] == [claim]
+    assert res.error is None and res.pack is not None and res.nudges == 1
 
     nudge = res.transcript[1].result["error"]
-    assert "does nothing until a pack" in nudge and claim in nudge
+    assert "emitted no pack" in nudge
     template = parse_json_object(nudge[nudge.index("{") :])
     assert template["parent_checkpoint"] == (obs["last_checkpoint"] or obs["subject_checkpoint"])
-    assert template["hypothesis"] == claim
-    # the template is itself a valid pack, so "change one number" cannot fail validation
-    from lab.pack import ArtifactPack
-
-    ArtifactPack.from_dict(template)
     assert nudge in roles.backend("thinker").prompts[1]
+
+
+def test_the_fill_template_carries_the_runs_real_parent_checkpoint(sup: Supervisor) -> None:
+    from lab.ensemble.prompts import pack_fill_prompt
+
+    obs = _research(sup)
+    prompt = pack_fill_prompt(obs, "steps 64->128", knob="steps")
+    template = parse_json_object(prompt[prompt.index("{") :])
+    assert template["parent_checkpoint"] == (obs["last_checkpoint"] or obs["subject_checkpoint"])
+    assert template["hypothesis"] == "steps 64->128"
 
 
 def test_the_angles_knob_is_a_placeholder_the_model_must_fill(sup: Supervisor) -> None:
@@ -270,6 +268,55 @@ def test_the_angles_knob_is_a_placeholder_the_model_must_fill(sup: Supervisor) -
 
     assert res.error is None and res.pack["config"]["lr"] == 0.0015
     assert "config.lr still holds a placeholder" in res.transcript[1].result["error"]
+
+
+def test_a_hypothesis_without_a_pack_triggers_a_focused_fill_turn(sup: Supervisor) -> None:
+    """Observed on Spark: Llama-3.2-3B re-emitted its thought with pack null
+    for three straight rounds because the ask was buried in the transcript.
+    The second stage asks for the pack alone and parses a bare object."""
+    from lab.ensemble.prompts import pack_template
+
+    obs = _research(sup)
+    claim = "steps 64->128, vs ep-0001 (confirm_ppl 198.3); expect lower"
+    filled = pack_template(obs, claim, knob="steps")
+    filled["config"]["steps"] = 128
+    roles = Roles.scripted(
+        thinker=[_thought(hypotheses=[_hyp(claim)]), json.dumps(filled)], tooler=[], coder=[]
+    )
+    res = _ens(sup, roles).run(obs)
+
+    assert res.error is None and res.pack["config"]["steps"] == 128
+    fill = res.transcript[-1]
+    assert fill.role == "thinker" and fill.tool == "pack_fill"
+    prompt = roles.backend("thinker").prompts[1]
+    assert prompt.startswith("Fill in one ArtifactPack")
+    assert claim in prompt and '"config.steps" to the number' in prompt
+    # the fill turn asks for a bare object, not another Thought
+    assert '"hypotheses"' not in prompt and "ONLY the pack" in prompt
+
+
+def test_a_fill_turn_that_keeps_the_placeholder_is_refused(sup: Supervisor) -> None:
+    from lab.ensemble.prompts import pack_template
+
+    obs = _research(sup)
+    copied = pack_template(obs, "steps 64->128", knob="steps")
+    # each round is one Thought call plus, when that thought has a hypothesis
+    # and no pack, one fill call
+    roles = Roles.scripted(
+        thinker=[
+            _thought(hypotheses=[_hyp("steps 64->128")]),
+            json.dumps(copied),
+            _thought(),
+            "not json",
+        ],
+        tooler=[],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    assert res.pack is None and sup.observe()["pack_hash"] is None
+    errors = [str(t.result.get("error", "")) for t in res.transcript if t.result]
+    assert any("config.steps still holds a placeholder" in e for e in errors)
+    assert any("not a JSON object" in e for e in errors)
 
 
 def test_a_placeholder_pack_never_reaches_the_supervisor(sup: Supervisor) -> None:
@@ -302,19 +349,35 @@ def test_template_returned_verbatim_is_sent_back_once(sup: Supervisor) -> None:
     tpl = pack_template(obs, "lr 1.5e-3 lowers confirm_ppl")
     edited = dict(tpl, config=dict(tpl["config"], lr=0.0015))
     roles = Roles.scripted(
-        thinker=[_thought(hypotheses=[_hyp("lr 1.5e-3")]), _thought(pack=tpl), _thought(pack=edited)],
+        thinker=[
+            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+            json.dumps(tpl),
+            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+            json.dumps(edited),
+        ],
         tooler=[],
         coder=[],
     )
     res = _ens(sup, roles, variant_hint=hint).run(obs)
     assert res.error is None and res.pack["config"]["lr"] == 0.0015
-    assert res.rounds == 3 and res.nudges == 2
-    assert "template unchanged" in res.transcript[3].result["error"]
+    assert res.nudges == 2
+    assert any(
+        "template unchanged" in str((t.result or {}).get("error", "")) for t in res.transcript
+    )
 
-    # a stubborn thinker is nudged only once, then its template pack is taken
-    sup2_roles = Roles.scripted(thinker=[_thought(pack=tpl), _thought(pack=tpl)], tooler=[], coder=[])
-    res2 = _ens(sup, sup2_roles, variant_hint=hint).run(obs)
-    assert res2.error is None and res2.pack is not None and res2.rounds == 2
+    # a stubborn thinker is refused once, then its template pack is taken
+    stubborn = Roles.scripted(
+        thinker=[
+            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+            json.dumps(tpl),
+            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+            json.dumps(tpl),
+        ],
+        tooler=[],
+        coder=[],
+    )
+    res2 = _ens(sup, stubborn, variant_hint=hint).run(obs)
+    assert res2.error is None and res2.pack is not None
 
 
 def test_pack_with_hypothesis_id_key_is_accepted(sup: Supervisor) -> None:

@@ -252,6 +252,38 @@ def pack_nudge(
     return lead + f'Reply again with the same JSON shape, with "pack" set to:\n{template}\n{tail}'
 
 
+def pack_fill_prompt(
+    obs: dict[str, Any],
+    claim: str,
+    *,
+    knob: str | None,
+    skills: str = "",
+) -> str:
+    """Ask for the pack alone, not another whole Thought.
+
+    Observed on Spark: Llama-3.2-3B re-emitted its original thought verbatim
+    with pack still null for three rounds, because the ask was buried in the
+    transcript of a prompt whose top asked for a Thought. Here the whole
+    prompt is the one remaining task, and the reply is one object.
+    """
+    template = json.dumps(pack_template(obs, claim, knob=knob))
+    task = (
+        f'Set "config.{knob}" to the number your claim names. Change nothing else.'
+        if knob
+        else "Set the values your claim names. Change nothing else."
+    )
+    return (
+        "Fill in one ArtifactPack. This is the only thing you have to do.\n"
+        f"Your claim: {claim}\n"
+        f"Pack:\n{template}\n"
+        f"{task}\n"
+        "Reply with ONLY the pack as one JSON object, starting with { and ending with }. "
+        "No prose, no markdown fence, no other fields.\n\n"
+        f"observation:\n{obs_digest(obs, max_chars=1200)}\n"
+        + (f"\n{skills}\n" if skills else "")
+    )
+
+
 _THOUGHT_SHAPE = (
     '{"thought": "<short reasoning>", '
     '"hypotheses": [{"claim": "...", "why": "...", "falsify": "..."}], '
@@ -361,6 +393,7 @@ __all__ = [
     "coder_prompt",
     "knob_for_hint",
     "obs_digest",
+    "pack_fill_prompt",
     "pack_nudge",
     "pack_template",
     "placeholder_fields",

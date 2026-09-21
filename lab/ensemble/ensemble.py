@@ -18,6 +18,7 @@ import time
 from lab.ensemble.prompts import (
     coder_prompt,
     knob_for_hint,
+    pack_fill_prompt,
     pack_nudge,
     pack_template,
     placeholder_fields,
@@ -29,7 +30,7 @@ from lab.ensemble.protocol import CodeAction, Thought, Turn
 from lab.ensemble.roles import Roles
 from lab.ensemble.skills import skills_for_role
 from lab.pack import ArtifactPack
-from lab.parse import parse_tool_call
+from lab.parse import parse_json_object, parse_tool_call
 from lab.tracing import CHAIN, LLM, TOOL, Tracer
 from lab.types import PHASE_TOOLS, Phase
 
@@ -150,7 +151,7 @@ class Ensemble:
             index=i, hypotheses=[], pack=None, rounds=0, tool_calls=0, code_runs=0, transcript=[]
         )
         last_call: tuple[str, str] | None = None
-        template_nudged = False
+        self._template_nudged = False
         try:
             for r in range(1, self.cfg.max_rounds + 1):
                 res.rounds = r
@@ -165,10 +166,10 @@ class Ensemble:
 
                     if thought.pack is not None:
                         pack_err = self._validate_pack(thought.pack)
-                        if pack_err is None and not template_nudged and self._is_template(thought.pack, obs):
+                        if pack_err is None and not self._template_nudged and self._is_template(thought.pack, obs):
                             # Small models sometimes hand the nudge template back
                             # verbatim; ask once for the edit the claim promised.
-                            template_nudged = True
+                            self._template_nudged = True
                             res.nudges += 1
                             self._synthetic(
                                 res,
@@ -210,7 +211,11 @@ class Ensemble:
                         break
 
                     res.nudges += 1
-                    self._synthetic(res, r, pack_nudge(obs, res.hypotheses, knob=self._knob))
+                    if res.hypotheses and self._fill_pack(obs, res, r):
+                        span.set(outputs={"pack": True, "via": "fill"})
+                        break
+                    if not res.hypotheses:
+                        self._synthetic(res, r, pack_nudge(obs, res.hypotheses, knob=self._knob))
                     span.set(outputs={"nudge": res.nudges})
                     if res.nudges >= MAX_NUDGES:
                         res.error = "thinker: no progress after 3 nudges"
@@ -400,6 +405,35 @@ class Ensemble:
         res.transcript.append(
             Turn(role="coder", prompt_chars=len(prompt), raw=raw, parsed_ok=True, result=result, ms=ms, round=r, tool=tool)
         )
+
+    def _fill_pack(self, obs: dict[str, Any], res: EnsembleResult, r: int) -> bool:
+        """Second stage: ask for the pack alone. True when we got a valid one."""
+        claim = res.hypotheses[-1]["claim"]
+        prompt = pack_fill_prompt(obs, claim, knob=self._knob, skills=self._skills["thinker"])
+        raw, ms = self._generate("thinker", prompt, obs, r)
+        pack = parse_json_object(raw)
+        err = "reply was not a JSON object" if pack is None else self._validate_pack(pack)
+        if err is None and not self._template_nudged and self._is_template(pack, obs):
+            self._template_nudged = True
+            err = "that is the template unchanged; apply the change your claim names"
+        res.transcript.append(
+            Turn(
+                role="thinker",
+                prompt_chars=len(prompt),
+                raw=raw,
+                parsed_ok=pack is not None,
+                result=None if err is None else {"ok": False, "error": err},
+                ms=ms,
+                round=r,
+                tool="pack_fill",
+            )
+        )
+        if err is not None:
+            self._synthetic(res, r, f"pack rejected: {err}")
+            return False
+        res.pack = _strip_pack(pack)
+        res.done = True
+        return True
 
     # -------------------------------------------------------------- helpers
 
