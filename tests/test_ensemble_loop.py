@@ -48,7 +48,8 @@ def _hyp(claim: str = "more steps lower confirm_ppl") -> dict:
 
 
 def _ens(sup: Supervisor, roles: Roles, **cfg_kw) -> Ensemble:
-    cfg = EnsembleConfig(index=1, variant_hint="training steps", **cfg_kw)
+    cfg_kw.setdefault("variant_hint", "training steps")
+    cfg = EnsembleConfig(index=1, **cfg_kw)
     return Ensemble(roles, sup, cfg, call_lock=threading.Lock(), tracer=sup.tracer)
 
 
@@ -244,12 +245,59 @@ def test_hypothesis_without_pack_gets_a_filled_template_nudge(sup: Supervisor) -
     assert nudge in roles.backend("thinker").prompts[1]
 
 
+def test_the_angles_knob_is_a_placeholder_the_model_must_fill(sup: Supervisor) -> None:
+    """Observed on Spark: Llama-3.2-3B copied the documented example pack while
+    claiming a different lr, in both cycles and both ensembles. The example it
+    is shown must therefore be unusable until the angle's knob is filled in."""
+    from lab.ensemble.prompts import PLACEHOLDER, knob_for_hint, pack_template
+
+    obs = _research(sup)
+    assert knob_for_hint("learning rate") == "lr"
+    assert knob_for_hint("data mix") is None
+
+    prompt = thinker_prompt(obs, [], variant_hint="learning rate", skills="")
+    assert PLACEHOLDER in prompt and '"config.lr" above is a placeholder' in prompt
+    # the steps angle masks a different key, so two ensembles cannot converge
+    # on one pack by copying the same example
+    assert pack_template(obs, knob="steps")["config"] != pack_template(obs, knob="lr")["config"]
+
+    copied = pack_template(obs, "lr 1.5e-3 lowers confirm_ppl", knob="lr")
+    filled = json.loads(json.dumps(copied))
+    filled["config"]["lr"] = 0.0015
+    roles = Roles.scripted(thinker=[_thought(pack=copied), _thought(pack=filled)], tooler=[], coder=[])
+    cfg = EnsembleConfig(index=1, variant_hint="learning rate")
+    res = Ensemble(roles, sup, cfg, call_lock=threading.Lock(), tracer=sup.tracer).run(obs)
+
+    assert res.error is None and res.pack["config"]["lr"] == 0.0015
+    assert "config.lr still holds a placeholder" in res.transcript[1].result["error"]
+
+
+def test_a_placeholder_pack_never_reaches_the_supervisor(sup: Supervisor) -> None:
+    """Config values are not type-checked downstream, so a placeholder string
+    would otherwise reach the trainer as an lr."""
+    from lab.ensemble.prompts import pack_template, placeholder_fields
+
+    obs = _research(sup)
+    copied = pack_template(obs, "claim", knob="lr")
+    assert placeholder_fields(copied) == ["config.lr"]
+    roles = Roles.scripted(thinker=[_thought(pack=copied)] * 4, tooler=[], coder=[])
+    cfg = EnsembleConfig(index=1, variant_hint="learning rate")
+    res = Ensemble(roles, sup, cfg, call_lock=threading.Lock(), tracer=sup.tracer).run(obs)
+    assert res.pack is None
+    assert sup.observe()["pack_hash"] is None
+
+
 def test_template_returned_verbatim_is_sent_back_once(sup: Supervisor) -> None:
     """Observed on Spark: after the template nudge the 1.5B thinker claimed
     'lr 1.5e-3' but returned the template with lr untouched. One more nudge
-    asks for the edit; if it insists, the pack is accepted (never loop)."""
-    from lab.ensemble.prompts import pack_template
+    asks for the edit; if it insists, the pack is accepted (never loop).
 
+    Angles with a knob are covered earlier by the placeholder check; this
+    backstop is what catches the angles that have no single key to mask."""
+    from lab.ensemble.prompts import knob_for_hint, pack_template
+
+    hint = "data mix"
+    assert knob_for_hint(hint) is None
     obs = _research(sup)
     tpl = pack_template(obs, "lr 1.5e-3 lowers confirm_ppl")
     edited = dict(tpl, config=dict(tpl["config"], lr=0.0015))
@@ -258,14 +306,14 @@ def test_template_returned_verbatim_is_sent_back_once(sup: Supervisor) -> None:
         tooler=[],
         coder=[],
     )
-    res = _ens(sup, roles).run(obs)
+    res = _ens(sup, roles, variant_hint=hint).run(obs)
     assert res.error is None and res.pack["config"]["lr"] == 0.0015
     assert res.rounds == 3 and res.nudges == 2
     assert "template unchanged" in res.transcript[3].result["error"]
 
     # a stubborn thinker is nudged only once, then its template pack is taken
     sup2_roles = Roles.scripted(thinker=[_thought(pack=tpl), _thought(pack=tpl)], tooler=[], coder=[])
-    res2 = _ens(sup, sup2_roles).run(obs)
+    res2 = _ens(sup, sup2_roles, variant_hint=hint).run(obs)
     assert res2.error is None and res2.pack is not None and res2.rounds == 2
 
 

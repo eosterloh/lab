@@ -17,8 +17,10 @@ import time
 
 from lab.ensemble.prompts import (
     coder_prompt,
+    knob_for_hint,
     pack_nudge,
     pack_template,
+    placeholder_fields,
     thinker_prompt,
     tool_catalog,
     tooler_prompt,
@@ -136,6 +138,7 @@ class Ensemble:
             "tooler": skills_for_role("tooler", max_chars=3000),
             "coder": skills_for_role("coder", max_chars=6000),
         }
+        self._knob = knob_for_hint(cfg.variant_hint)
         self._catalog = tool_catalog(Phase.RESEARCH, exclude=FORBIDDEN_TOOLS)
         self._allowed = PHASE_TOOLS[Phase.RESEARCH] - FORBIDDEN_TOOLS
 
@@ -207,7 +210,7 @@ class Ensemble:
                         break
 
                     res.nudges += 1
-                    self._synthetic(res, r, pack_nudge(obs, res.hypotheses))
+                    self._synthetic(res, r, pack_nudge(obs, res.hypotheses, knob=self._knob))
                     span.set(outputs={"nudge": res.nudges})
                     if res.nudges >= MAX_NUDGES:
                         res.error = "thinker: no progress after 3 nudges"
@@ -409,14 +412,20 @@ class Ensemble:
             seen.add(key)
             res.hypotheses.append(dict(h))
 
-    @staticmethod
-    def _is_template(pack: dict[str, Any], obs: dict[str, Any]) -> bool:
+    def _is_template(self, pack: dict[str, Any], obs: dict[str, Any]) -> bool:
         """True when the pack's experimental content equals the nudge template."""
-        tpl = pack_template(obs)
+        tpl = pack_template(obs, knob=self._knob)
         return pack.get("config") == tpl["config"] and pack.get("data_manifest") == tpl["data_manifest"]
 
-    @staticmethod
-    def _validate_pack(pack: dict[str, Any]) -> str | None:
+    def _validate_pack(self, pack: dict[str, Any]) -> str | None:
+        # A placeholder left in place means the model copied the example
+        # instead of answering it. Catch it here: config values are not
+        # type-checked downstream, so a string lr would reach the trainer.
+        stale = placeholder_fields(pack)
+        if stale:
+            return (
+                f"{', '.join(stale)} still holds a placeholder. Replace it with the value your claim names."
+            )
         try:
             ArtifactPack.from_dict(_strip_pack(pack))
         except (ValueError, TypeError, KeyError) as e:

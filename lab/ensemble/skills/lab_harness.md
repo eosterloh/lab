@@ -2,9 +2,9 @@
 Facts about the lab Eval -> Research -> Train harness: packs, jobs, metrics, checkpoints, phases, tools.
 
 ## Pack schema (`lab/pack.py:ArtifactPack`)
-Exactly these fields; unknown keys are rejected:
+Exactly these fields; unknown keys are rejected. The values are shape, not content: choose your own from the observation.
 ```json
-{"hypothesis": "lr 1e-3 for 64 steps lowers confirm_ppl vs ep-0003 (lr 3e-3, 32 steps)",
+{"hypothesis": "<knob> <old>-><new>, vs <baseline ep> (confirm_ppl <ppl>); expect lower",
  "trainer": "lab",
  "config": {"lr": 0.001, "steps": 64, "hidden": 32, "layers": 1, "heads": 1, "seq_len": 32, "batch": 8},
  "data_manifest": {"sources": ["hf:roneneldan/TinyStories:train:10000"]},

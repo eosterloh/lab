@@ -161,31 +161,67 @@ def transcript_tail(transcript: list[Turn], n: int = 6, clip: int = 600) -> str:
     return "\n".join(lines)
 
 
-_PACK_EXAMPLE = json.dumps(
-    {
-        "hypothesis": "<one sentence: what changes and why confirm_ppl should drop>",
-        "trainer": "lab",
-        "config": {"lr": 0.001, "steps": 64, "hidden": 32, "layers": 1, "heads": 1, "seq_len": 32, "batch": 8},
-        "data_manifest": {"sources": list(DEFAULT_MIX)},
-        "eval_suite_id": "core",
-        "eval_suite_version": 1,
-        "parent_checkpoint": "<observation.last_checkpoint or subject_checkpoint>",
-        "budgets": {"max_hours": 0.1, "max_steps": 64},
-    }
-)
+# A filled example is the fastest way to get a small model to emit a valid
+# pack, and also the fastest way to get it to emit *that example* as its own
+# experiment. Observed on Spark: Llama-3.2-3B returned the documentation's
+# claim and config verbatim in both cycles while claiming a different lr.
+# So every example leaves the knob under test as a placeholder: the model
+# cannot copy its way to a valid pack, only to an error that names the field.
+PLACEHOLDER = "<value your claim names>"
 
-def pack_template(obs: dict[str, Any], hypothesis: str | None = None) -> dict[str, Any]:
-    """A concrete, valid pack for this run that a small model only has to edit.
+# Which config key each variant hint is asking the ensemble to move.
+HINT_KNOB = {
+    "learning rate": "lr",
+    "training steps": "steps",
+    "batch size / sequence length": "batch",
+    "width or depth (architecture; weights will not resume)": "hidden",
+}
 
-    Small thinkers reliably state a hypothesis but stall at composing a pack
-    from a schema; handing them a filled template with the real parent
-    checkpoint turns "write a pack" into "change one number".
+
+def knob_for_hint(hint: str) -> str | None:
+    """The config key an angle varies, or None for angles that are not one key."""
+    return HINT_KNOB.get(hint)
+
+
+def _has_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("<") and value.endswith(">")
+
+
+def placeholder_fields(pack: dict[str, Any]) -> list[str]:
+    """Field paths in a pack still holding an unedited placeholder."""
+    out = [k for k, v in pack.items() if _has_placeholder(v)]
+    out += [f"config.{k}" for k, v in (pack.get("config") or {}).items() if _has_placeholder(v)]
+    return sorted(out)
+
+
+def pack_template(
+    obs: dict[str, Any],
+    hypothesis: str | None = None,
+    *,
+    knob: str | None = None,
+) -> dict[str, Any]:
+    """A pack for this run that a small model only has to finish.
+
+    Everything is filled from the real observation except `knob` -- the one key
+    this ensemble's angle exists to vary. That key is a placeholder, so the
+    model must supply the number its own claim promised.
     """
     parent = obs.get("last_checkpoint") or obs.get("subject_checkpoint") or "<subject_checkpoint>"
+    config: dict[str, Any] = {
+        "lr": 0.001,
+        "steps": 64,
+        "hidden": 32,
+        "layers": 1,
+        "heads": 1,
+        "seq_len": 32,
+        "batch": 8,
+    }
+    if knob in config:
+        config[knob] = PLACEHOLDER
     return {
         "hypothesis": hypothesis or "<one sentence: what changes and why confirm_ppl should drop>",
         "trainer": "lab",
-        "config": {"lr": 0.001, "steps": 64, "hidden": 32, "layers": 1, "heads": 1, "seq_len": 32, "batch": 8},
+        "config": config,
         "data_manifest": {"sources": list(DEFAULT_MIX)},
         "eval_suite_id": "core",
         "eval_suite_version": 1,
@@ -194,20 +230,26 @@ def pack_template(obs: dict[str, Any], hypothesis: str | None = None) -> dict[st
     }
 
 
-def pack_nudge(obs: dict[str, Any], hypotheses: list[dict[str, Any]]) -> str:
+def pack_nudge(
+    obs: dict[str, Any],
+    hypotheses: list[dict[str, Any]],
+    *,
+    knob: str | None = None,
+) -> str:
     """Nudge text for a thinker that stated a hypothesis but emitted no pack."""
     claim = hypotheses[-1]["claim"] if hypotheses else None
-    template = json.dumps(pack_template(obs, claim))
+    template = json.dumps(pack_template(obs, claim, knob=knob))
     lead = (
         "A hypothesis does nothing until a pack tests it. "
         if hypotheses
         else "You asked for nothing and emitted no pack. "
     )
-    return (
-        lead
-        + 'Reply again with the same JSON shape, but set "pack" to this template with ONLY the values your '
-        f"claim names changed (e.g. config.lr or config.steps):\n{template}"
+    tail = (
+        f'Replace "config.{knob}" with the number your claim names; leave every other value alone.'
+        if knob
+        else "Change only the values your claim names; leave every other value alone."
     )
+    return lead + f'Reply again with the same JSON shape, with "pack" set to:\n{template}\n{tail}'
 
 
 _THOUGHT_SHAPE = (
@@ -226,6 +268,14 @@ def thinker_prompt(
     variant_hint: str,
     skills: str,
 ) -> str:
+    knob = knob_for_hint(variant_hint)
+    example = json.dumps(pack_template(obs, knob=knob))
+    knob_rule = (
+        f'- "config.{knob}" above is a placeholder. Your angle is {variant_hint}, so {knob} is the one value '
+        "you choose; it must be the number your claim names, and every other config value stays as given.\n"
+        if knob
+        else ""
+    )
     return (
         "You are the THINKER of ONE of N parallel experimenters in a local ML harness.\n"
         f"Your angle: {variant_hint}. Other experimenters cover other angles; do not drift.\n"
@@ -233,9 +283,12 @@ def thinker_prompt(
         '("need": {"kind": "tool", "request": "<what to look up>"}) or for a script '
         '("need": {"kind": "code", "request": "<what it should compute>"}); the result '
         "appears in the transcript next turn.\n"
-        'When you are ready, emit "pack": one ArtifactPack for the lab trainer. Schema (values are placeholders):\n'
-        f"{_PACK_EXAMPLE}\n"
+        'When you are ready, emit "pack": one ArtifactPack for the lab trainer, filled in for THIS run:\n'
+        f"{example}\n"
         "Rules:\n"
+        + knob_rule
+        + "- Numbers and claims in the reference material are illustrations from other runs. Never copy one; "
+        "read the episodes in your observation and choose your own.\n"
         "- parent_checkpoint = observation.last_checkpoint when set, else subject_checkpoint.\n"
         "- Keep hidden/layers/heads/seq_len identical to the parent so weights resume, unless your angle is "
         "architecture; then parent_checkpoint may be the subject and you must note that weights will not resume.\n"
@@ -301,10 +354,16 @@ def coder_prompt(
 
 
 __all__ = [
+    "HINT_KNOB",
+    "PLACEHOLDER",
     "TOOL_SCHEMAS",
     "VARIANT_HINTS",
     "coder_prompt",
+    "knob_for_hint",
     "obs_digest",
+    "pack_nudge",
+    "pack_template",
+    "placeholder_fields",
     "thinker_prompt",
     "tool_catalog",
     "tooler_prompt",
