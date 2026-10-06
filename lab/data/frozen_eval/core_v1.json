@@ -7,7 +7,7 @@
   "description": "Trainer loss/PPL, frozen holdout PPL (tune/confirm/ood), plus HellaSwag, ARC-Easy, PIQA.",
   "lm": {
     "tune": "lm_tune.jsonl",
-    "confirm": "lm_confirm.jsonl",
+    "confirm": "lm_confirm_v1.jsonl",
     "ood": "lm_ood.jsonl"
   },
   "mc": {

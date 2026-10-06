@@ -61,7 +61,7 @@ def test_sandbox_write_cannot_escape_into_frozen_eval(sup) -> None:
 def test_pack_rejects_train_budget_above_hard_ceiling(sup) -> None:
     assert sup.call("enter_research")["ok"]
     pack = dummy_pack(sup.observe())
-    pack["budgets"] = {"max_hours": 9.0, "max_steps": 10}
+    pack["budgets"] = {"max_hours": 100.0, "max_steps": 10}
     out = sup.call("write_pack", {"pack": pack})
     assert out["ok"] is False
 

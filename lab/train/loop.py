@@ -6,8 +6,11 @@ import argparse
 import json
 import math
 import os
+import time
 from pathlib import Path
 from typing import Any
+
+from lab.pack import parent_plan, normalize_stage
 
 
 BUILTIN_CORPUS = Path(__file__).parent / "corpus.txt"
@@ -143,6 +146,41 @@ def make_batch(ids: list[int], seq: int, batch: int, torch: Any) -> tuple[Any, A
     return torch.tensor(xs, dtype=torch.long), torch.tensor(ys, dtype=torch.long)
 
 
+# Printed during a long run. Either the step ceiling or the clock can end the job.
+EVAL_EVERY = 200
+# A pack may not ask for more steps than this, even if the clock is still open.
+SAFETY_STEPS = 1_000_000
+
+
+def step_ceiling(cfg: dict[str, Any], budgets: dict[str, Any]) -> int:
+    """How many steps this job may run. The wall clock is a second stop."""
+    ceiling = int(budgets.get("max_steps") or cfg.get("steps") or SAFETY_STEPS)
+    if cfg.get("steps") is not None:
+        ceiling = min(ceiling, int(cfg["steps"]))
+    return max(min(ceiling, SAFETY_STEPS), 1)
+
+
+def split_ids(ids: list[int], seq: int) -> tuple[list[int], list[int]]:
+    """Last tenth of the bytes is the trainer's own val split."""
+    tail = max(seq + 1, len(ids) // 10)
+    if len(ids) - tail < seq + 1:
+        return ids, ids
+    return ids[:-tail], ids[-tail:]
+
+
+def mean_loss(model: Any, ids: list[int], seq: int, batch: int, torch: Any, F: Any, vocab: int, device: Any) -> float:
+    model.eval()
+    total = 0.0
+    n = 4
+    with torch.inference_mode():
+        for _ in range(n):
+            x, y = make_batch(ids, seq, batch, torch)
+            x, y = x.to(device), y.to(device)
+            total += float(F.cross_entropy(model(x).reshape(-1, vocab), y.reshape(-1)).item())
+    model.train()
+    return total / n
+
+
 def train(job_dir: Path) -> dict[str, Any]:
     torch, nn, F = _require_torch()
     pack = json.loads((job_dir / "pack.json").read_text(encoding="utf-8"))
@@ -154,37 +192,62 @@ def train(job_dir: Path) -> dict[str, Any]:
     seq = int(cfg.get("seq_len", 32))
     batch = int(cfg.get("batch", 8))
     lr = float(cfg.get("lr", 3e-3))
-    steps = int(cfg.get("steps", budgets.get("max_steps") or 20))
+    steps = step_ceiling(cfg, budgets)
+    hours = float(budgets.get("max_hours") or 84.0)
     vocab = 256
+    stage = normalize_stage(pack.get("stage") or cfg.get("stage"))
+    plan = parent_plan(stage, parent_exists=(job_dir / "parent.pt").is_file())
 
     text = load_text(pack, job_dir)
     ids = encode_bytes(text)
+    train_ids, val_ids = split_ids(ids, seq)
     device = pick_device(torch)
     model = build_model(nn, vocab, hidden, layers, heads, seq).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     resumed = False
+    optim_resumed = False
     parent_path = job_dir / "parent.pt"
-    if parent_path.is_file():
+    if plan["required"] and not parent_path.is_file():
+        raise RuntimeError(f"{stage} requires parent.pt; there is no checkpoint to start from")
+    if plan["load_weights"] and parent_path.is_file():
         try:
             _m, arch, _d, blob = load_checkpoint(parent_path, device=device)
-            if same_arch(arch, hidden, layers, heads, seq, vocab):
+            if not same_arch(arch, hidden, layers, heads, seq, vocab):
+                if stage == "continue":
+                    print("parent architecture mismatch; training from scratch", flush=True)
+                else:
+                    raise RuntimeError(
+                        f"{stage} parent architecture does not match this pack; refusing to start from scratch"
+                    )
+            else:
                 model.load_state_dict(blob["model"])
-                if blob.get("optim"):
+                resumed = True
+                if plan["load_optim"] and blob.get("optim"):
                     try:
                         opt.load_state_dict(blob["optim"])
+                        optim_resumed = True
                     except Exception:
                         pass
-                resumed = True
-                print(f"resumed parent={parent_path}", flush=True)
-            else:
-                print("parent architecture mismatch; training from scratch", flush=True)
+                print(f"resumed parent={parent_path} stage={stage} optim={optim_resumed}", flush=True)
+        except RuntimeError:
+            raise
         except Exception as e:
+            if stage != "continue":
+                raise RuntimeError(f"{stage} parent load failed: {e}") from e
             print(f"parent load failed ({e}); training from scratch", flush=True)
+    elif stage == "pretrain" and parent_path.is_file():
+        print("pretrain ignores parent.pt", flush=True)
     model.train()
     last = 0.0
     tokens = 0
+    ran = 0
+    stop_reason = "max_steps"
+    deadline = time.time() + hours * 3600.0
     for step in range(1, steps + 1):
-        x, y = make_batch(ids, seq, batch, torch)
+        if time.time() >= deadline:
+            stop_reason = "max_hours"
+            break
+        x, y = make_batch(train_ids, seq, batch, torch)
         x, y = x.to(device), y.to(device)
         logits = model(x)
         loss = F.cross_entropy(logits.reshape(-1, vocab), y.reshape(-1))
@@ -194,14 +257,15 @@ def train(job_dir: Path) -> dict[str, Any]:
         opt.step()
         last = float(loss.item())
         tokens += int(x.numel())
-        if step == 1 or step == steps or step % 10 == 0:
+        ran = step
+        if step == 1 or step == steps or step % 50 == 0:
             print(f"step={step} train_loss={last:.4f}", flush=True)
+        if step % EVAL_EVERY == 0:
+            val_now = mean_loss(model, val_ids, seq, batch, torch, F, vocab, device)
+            print(f"step={step} val_loss={val_now:.4f}", flush=True)
 
-    model.eval()
-    with torch.inference_mode():
-        x, y = make_batch(ids, seq, batch, torch)
-        x, y = x.to(device), y.to(device)
-        val = float(F.cross_entropy(model(x).reshape(-1, vocab), y.reshape(-1)).item())
+    val = mean_loss(model, val_ids, seq, batch, torch, F, vocab, device)
+    print(f"stop={stop_reason} steps={ran}/{steps}", flush=True)
 
     ckpt = job_dir / "checkpoint.pt"
     torch.save(
@@ -214,6 +278,7 @@ def train(job_dir: Path) -> dict[str, Any]:
                 "heads": heads,
                 "seq_len": seq,
                 "vocab": vocab,
+                "stage": stage,
             },
         },
         ckpt,
@@ -223,7 +288,9 @@ def train(job_dir: Path) -> dict[str, Any]:
         "train_loss": round(last, 4),
         "val_loss": round(val, 4),
         "val_ppl": round(math.exp(min(val, 20.0)), 4),
-        "steps": steps,
+        "steps": ran,
+        "max_steps": steps,
+        "stop_reason": stop_reason,
         "lr": lr,
         "tokens_seen": tokens,
         "hidden": hidden,
@@ -232,6 +299,8 @@ def train(job_dir: Path) -> dict[str, Any]:
         "checkpoint": str(ckpt),
         "n_params": int(sum(p.numel() for p in model.parameters())),
         "resumed": resumed,
+        "optim_resumed": optim_resumed,
+        "stage": stage,
         "parent": str(parent_path) if resumed else None,
         "train_chars": len(text),
     }

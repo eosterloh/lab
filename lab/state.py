@@ -32,6 +32,9 @@ class RunState:
     # Sealed trials of the current cycle:
     # [{"trial", "hypothesis_id", "pack_hash", "job_id", "confirm_ppl", ...}].
     trial_results: list[dict[str, Any]] = field(default_factory=list)
+    # Wall clock when the current phase was entered. None on a resumed run
+    # whose state predates this field, so Jev does not invent a dwell.
+    phase_entered_at: float | None = None
 
     def mid_trials(self) -> bool:
         """True while a multi-trial cycle is in flight (trial > 1 or candidates queued)."""

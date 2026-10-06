@@ -147,10 +147,13 @@ if __name__ == "__main__":
 Inputs are `[batch, seq, hidden]`. Without it the encoder expects `[seq, batch, hidden]` and the embedding sum silently trains on transposed data.
 
 ## Resume from parent.pt
-Load weights only if `config` matches on all five keys (the trainer's `same_arch`). On mismatch train from scratch and print it. `optim` may be loaded too; wrap in try/except. Never resize embeddings to "make it fit".
+`stage` decides this. `pretrain` ignores the file. `continue` loads weights and Adam when `same_arch` matches, and starts from scratch on a mismatch. `midtrain` and `posttrain` load weights only (fresh Adam) and fail the job if the file is missing or the architecture does not match. Never resize embeddings to "make it fit".
 
 ## Count parameters
-`sum(p.numel() for p in model.parameters())`. Rough size: `2*vocab*hidden + seq*hidden + layers*(12*hidden**2)`.
+`sum(p.numel() for p in model.parameters())`. That is the whole TinyGPT. Nothing is frozen and there is no LoRA adapter. Rough size: `2*vocab*hidden + seq*hidden + layers*(12*hidden**2)`.
+
+## When the real trainer stops
+`metrics.stop_reason` is `max_hours` or `max_steps`. Both can end the job. `stage` picks the clock cap: pretrain and continue 84 hours, midtrain 24, posttrain 8. `pretrain` does not load `parent.pt`. `continue` loads weights and Adam. `midtrain` and `posttrain` load weights, reset Adam, and fail if the parent is missing or the architecture does not match. The sketch above shows the block; the shipped loop is `lab/train/loop.py`.
 
 ## Perplexity on held-out text
 ```python

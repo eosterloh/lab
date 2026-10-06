@@ -15,7 +15,7 @@ from lab.llm_policy import DEFAULT_POLICY_MODEL, InferPolicy, load_infer_engine
 from lab.policy import DummyPolicy, InterleavePolicy, LabPolicy, ScriptedPolicy
 from lab.promote import promote
 from lab.supervisor import Supervisor
-from lab.trace_report import markdown, summarize
+from lab.trace_report import load_trace, markdown, summarize
 
 
 def _timestamp() -> str:
@@ -164,6 +164,48 @@ def cmd_trace_report(run_dir: Path, as_json: bool) -> int:
     return 0 if summary["spans"] else 1
 
 
+def cmd_jev(run_dir: Path) -> int:
+    """Classify trace.jsonl. No model load."""
+    from lab.jev import classify
+
+    verdict = classify(load_trace(run_dir))
+    print(json.dumps(verdict, indent=2, default=str))
+    return 0
+
+
+def cmd_heal(run_dir: Path, every: float | None, passes: int) -> int:
+    """Look at a run's trace with Jev and write a heal card when it is not good."""
+    from lab.healer import Healer
+
+    healer = Healer(run_dir)
+    if every is None:
+        result: object = healer.pass_once(when="after")
+    else:
+        result = healer.watch(every=every, passes=passes, when="during")
+    print(json.dumps(result, indent=2, default=str))
+    if isinstance(result, list):
+        return 0 if all(row.get("good") for row in result) else 1
+    return 0 if result.get("good") else 1
+
+
+def cmd_dry_eval() -> int:
+    """Phase cadence, train linger, and one scripted thinker/tooler/coder cycle."""
+    from lab.dry_eval import run_dry_evals
+
+    report = run_dry_evals()
+    shown = {
+        "ok": report["ok"],
+        "gpu": False,
+        "cases": report["cases"],
+        "hooks": {
+            name: {"status": spec["status"], "idea": spec["idea"]}
+            for name, spec in report["hooks"].items()
+        },
+    }
+    print(json.dumps(shown, indent=2))
+    return 0 if report["ok"] else 1
+
+
 def cmd_seal(run_dir: Path) -> int:
     """Write an episode card from the latest finished job+eval (idempotent)."""
     sup = Supervisor(_cfg(run_dir))
@@ -252,11 +294,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_roles = sub.add_parser("roles", help="print the ensemble role registry (roles.json)")
     add_run_dir(p_roles)
 
+    p_jev = sub.add_parser("jev", help="classify a run's trace.jsonl (no model, no GPU)")
+    add_run_dir(p_jev)
+
+    p_heal = sub.add_parser("heal", help="parallel healer: Jev decides, then a heal card is written")
+    add_run_dir(p_heal)
+    p_heal.add_argument("--every", type=float, default=None, help="seconds between looks while a run is in progress")
+    p_heal.add_argument("--passes", type=int, default=1, help="how many looks (default 1)")
+
+    sub.add_parser("dry-eval", help="CPU-only harness evals: phases, roles, Jev")
+
     args = p.parse_args(argv)
+    if args.cmd == "dry-eval":
+        return cmd_dry_eval()
     run_dir = args.run_dir
     if run_dir is None:
         run_dir = Path("runs") / _timestamp()
-        if args.cmd in {"status", "promote", "seal", "trace-report", "roles"}:
+        if args.cmd in {"status", "promote", "seal", "trace-report", "roles", "jev", "heal"}:
             p.error("--run-dir is required")
 
     if args.cmd == "init":
@@ -284,4 +338,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_seal(run_dir)
     if args.cmd == "trace-report":
         return cmd_trace_report(run_dir, args.json)
+    if args.cmd == "jev":
+        return cmd_jev(run_dir)
+    if args.cmd == "heal":
+        return cmd_heal(run_dir, args.every, args.passes)
     raise SystemExit("unknown command")

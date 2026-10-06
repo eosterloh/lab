@@ -11,7 +11,7 @@ import json
 
 from lab.policy import DummyPolicy
 from lab.trace_report import markdown, summarize
-from lab.tracing import LLM, TOOL, Tracer, langsmith_enabled
+from lab.tracing import LLM, TOOL, Tracer, for_trace, langsmith_enabled, redact_system
 
 
 def _rows(path: Path) -> list[dict]:
@@ -23,6 +23,46 @@ def test_langsmith_stays_off_without_the_env_var(monkeypatch) -> None:
     assert langsmith_enabled() is False
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     assert langsmith_enabled() is False
+
+
+def test_tool_payloads_are_stored_whole_and_role_prompts_become_system(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    tracer = Tracer(path, use_langsmith=False)
+    blob = "x" * 5000
+    prompt = (
+        "You are the TOOLER. Fulfil this request with exactly one tool call.\n"
+        "request: count the episodes\n"
+        "Reply with ONE JSON object and nothing else.\n"
+        "tools:\nlist_episodes {n?: int} — past episodes\n\n"
+        "observation:\nconfirm_ppl=3.2\n\n"
+        "transcript (last 6 turns):\n[round 1] thinker -> list_episodes\n\n"
+        "# lab_harness\nThe whole skill file would live here.\n"
+    )
+    with tracer.span("tool.read_notebook", kind=TOOL, inputs={"n": 20, "blob": blob}) as span:
+        span.set(outputs={"ok": True, "blob": blob})
+    with tracer.span("ensemble 1 tooler", kind=LLM, inputs=prompt) as span:
+        span.set(outputs='{"tool": "list_episodes", "args": {"n": 1}}')
+
+    rows = {r["name"]: r for r in _rows(path)}
+    assert rows["tool.read_notebook"]["inputs"]["blob"] == blob
+    assert rows["tool.read_notebook"]["outputs"]["blob"] == blob
+    stored = rows["ensemble 1 tooler"]["inputs"]
+    assert stored.startswith("system\n")
+    assert "You are the TOOLER" not in stored
+    assert "# lab_harness" not in stored
+    assert "request: count the episodes" in stored
+    assert "confirm_ppl=3.2" in stored
+    assert "list_episodes" in stored
+    assert rows["ensemble 1 tooler"]["outputs"] == '{"tool": "list_episodes", "args": {"n": 1}}'
+
+
+def test_redact_system_leaves_tool_results_and_keeps_policy_state() -> None:
+    assert redact_system('{"ok": true}') == '{"ok": true}'
+    policy = "You are the experimenter in a local ML harness.\nRules stay here.\nphase=eval cycle=1\nobservation={}\n"
+    stored = for_trace(policy)
+    assert stored.startswith("system\n")
+    assert "Rules stay here" not in stored
+    assert "phase=eval cycle=1" in stored
 
 
 def test_spans_record_nesting_and_timing(tmp_path: Path) -> None:

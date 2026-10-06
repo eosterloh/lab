@@ -11,8 +11,17 @@ import json
 import re
 
 from lab.data_cache import DEFAULT_MIX
+from lab.pack import DEFAULT_CONTINUE_HOURS
 from lab.ensemble.protocol import Turn
 from lab.types import PHASE_TOOLS, Phase
+
+PASS_ON = (
+    "Pass the work on before you emit a pack. Set pack to null and need to one of: "
+    '{"kind": "tool", "request": "read the latest episode confirm_ppl and its config"} '
+    "or "
+    '{"kind": "code", "request": "count characters in the train mix and print that number"}. '
+    "A pack is rejected until that result is in the transcript. Put what you learned in the claim."
+)
 
 # Angles handed to parallel ensembles so they do not all try the same thing.
 VARIANT_HINTS = [
@@ -44,6 +53,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "list_models": {"args": {}, "purpose": "model dirs under LAB_MODELS_DIR"},
     "inspect_model": {"args": {"model_dir": "str"}, "purpose": "config-only capabilities of a model dir"},
     "read_checkpoint_meta": {"args": {"path": "str"}, "purpose": "config/n_params of a .pt under run_dir (needs torch)"},
+    "list_checkpoints": {"args": {}, "purpose": "checkpoint bank slots: bank:subject, latest, best, pretrain, continue, midtrain, posttrain"},
     "read_train_log": {"args": {"job_id?": "str", "tail?": "int"}, "purpose": "job dict + train.log tail"},
     "read_trace": {"args": {"cycle?": "int", "n?": "int", "kind?": "tool|llm|chain"}, "purpose": "last n trace rows"},
     "list_packs": {"args": {"n?": "int"}, "purpose": "newest packs (hash, hypothesis, config)"},
@@ -106,6 +116,20 @@ def obs_digest(obs: dict[str, Any], max_chars: int = 3000) -> str:
         f"subject_checkpoint={obs.get('subject_checkpoint')}",
         f"last_checkpoint={obs.get('last_checkpoint')}",
     ]
+    bank = list(obs.get("checkpoint_bank") or [])
+    if bank:
+        lines.append("checkpoint_bank (set parent_checkpoint to one of these ids):")
+        for row in bank:
+            arch = " ".join(
+                f"{key}={row.get(key)}"
+                for key in ("hidden", "layers", "heads", "seq_len")
+                if row.get(key) is not None
+            )
+            lines.append(
+                f"  - {row.get('id')} stage={row.get('stage')} confirm_ppl={row.get('confirm_ppl')} {arch}".rstrip()
+            )
+    else:
+        lines.append("checkpoint_bank: empty")
     scored = [e for e in episodes if e.get("confirm_ppl") is not None]
     if scored:
         best = min(scored, key=lambda e: float(e["confirm_ppl"]))
@@ -207,10 +231,17 @@ def pack_template(
     this ensemble's angle exists to vary. That key is a placeholder, so the
     model must supply the number its own claim promised.
     """
-    parent = obs.get("last_checkpoint") or obs.get("subject_checkpoint") or "<subject_checkpoint>"
+    bank = list(obs.get("checkpoint_bank") or [])
+    slots = {str(row.get("slot")) for row in bank}
+    if "best" in slots:
+        parent = "bank:best"
+    elif "latest" in slots:
+        parent = "bank:latest"
+    else:
+        parent = obs.get("last_checkpoint") or obs.get("subject_checkpoint") or "<subject_checkpoint>"
     config: dict[str, Any] = {
         "lr": 0.001,
-        "steps": 64,
+        "steps": 1_000_000,
         "hidden": 32,
         "layers": 1,
         "heads": 1,
@@ -225,9 +256,10 @@ def pack_template(
         "config": config,
         "data_manifest": {"sources": list(DEFAULT_MIX)},
         "eval_suite_id": "core",
-        "eval_suite_version": 1,
+        "eval_suite_version": 2,
         "parent_checkpoint": parent,
-        "budgets": {"max_hours": 0.1, "max_steps": 64},
+        "stage": "continue",
+        "budgets": {"max_hours": round(DEFAULT_CONTINUE_HOURS, 4), "max_steps": 1_000_000},
     }
 
 
@@ -437,6 +469,8 @@ def thinker_prompt(
     return (
         "You are the THINKER of ONE of N parallel experimenters in a local ML harness.\n"
         f"Your angle: {variant_hint}. Other experimenters cover other angles; do not drift.\n"
+        "Your first reply passes the work on. Do not emit a pack yet.\n"
+        f"{PASS_ON}\n"
         "You cannot call tools yourself. You may ask for a tool call "
         '("need": {"kind": "tool", "request": "<what to look up>"}) or for a script '
         '("need": {"kind": "code", "request": "<what it should compute>"}); the result '
@@ -448,14 +482,23 @@ def thinker_prompt(
         + cold_start_rule(obs)
         + "- Numbers and claims in the reference material are illustrations from other runs. Never copy one; "
         "read the episodes in your observation and choose your own.\n"
-        "- parent_checkpoint = observation.last_checkpoint when set, else subject_checkpoint.\n"
-        "- Keep hidden/layers/heads/seq_len identical to the parent so weights resume, unless your angle is "
-        "architecture; then parent_checkpoint may be the subject and you must note that weights will not resume.\n"
+        "- parent_checkpoint is bank:<slot> from checkpoint_bank when that list is non-empty "
+        "(bank:best, bank:latest, bank:subject, bank:pretrain, bank:continue, bank:midtrain, bank:posttrain). "
+        "Otherwise use subject_checkpoint. Do not invent a path.\n"
+        "- stage is one of pretrain, continue, midtrain, posttrain. You may change it.\n"
+        "  pretrain: new weights, ignore any parent, max_hours up to 84 (3.5 days).\n"
+        "  continue: resume weights and Adam when the architecture matches, max_hours up to 84.\n"
+        "  midtrain: resume weights, fresh Adam, new data mix, max_hours up to 24. Parent is required.\n"
+        "  posttrain: resume weights, fresh Adam, max_hours up to 8. Parent is required.\n"
+        "- You may set budgets.max_hours inside that stage's cap. The job ends at max_hours or at "
+        "config.steps / budgets.max_steps, whichever comes first.\n"
+        "- Keep hidden/layers/heads/seq_len identical to the parent so weights resume, unless stage is "
+        "pretrain or your angle is architecture.\n"
         "- Write 1-3 hypotheses in total across your turns, each with claim / why / falsify.\n"
         "- A hypothesis is inert until a pack tests it: the turn that states a hypothesis should also carry "
         'its "pack", unless you first need a tool or code result.\n'
         "- Do not repeat a config that already appears in episodes.\n"
-        "- budgets.max_hours <= 0.5. eval_suite_id 'core', eval_suite_version 1.\n"
+        "- eval_suite_id 'core', eval_suite_version 2.\n"
         '- When you have nothing more to ask and no pack, set "done": true.\n'
         "Reply with ONE JSON object of this shape and nothing else:\n"
         f"{_THOUGHT_SHAPE}\n\n"

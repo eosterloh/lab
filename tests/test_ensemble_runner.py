@@ -43,6 +43,8 @@ def _angle_thinker(obs: dict, *, steps_by_angle: dict[str, int]):
     """Callable thinker keyed on the variant hint in the prompt."""
 
     def reply(prompt: str) -> str:
+        if "tooler -> list_episodes" not in prompt:
+            return _thought(need={"kind": "tool", "request": "list episodes"})
         for angle, steps in steps_by_angle.items():
             if f"Your angle: {angle}" in prompt:
                 pack = dummy_pack(obs, extra_config={"steps": steps})
@@ -57,7 +59,7 @@ def test_two_ensembles_commit_two_trials(sup: Supervisor) -> None:
     obs = _research(sup)
     roles = Roles.scripted(
         thinker=_angle_thinker(obs, steps_by_angle={"learning rate": 12, "training steps": 40}),
-        tooler=[],
+        tooler=lambda prompt: '{"tool": "list_episodes", "args": {"n": 1}}',
         coder=[],
     )
     runner = EnsembleRunner(roles, sup, n=2, max_rounds=4, tracer=sup.tracer)
@@ -98,8 +100,12 @@ def test_identical_packs_are_deduped_to_one_candidate(sup: Supervisor) -> None:
     obs = _research(sup)
     pack = dummy_pack(obs)
     roles = Roles.scripted(
-        thinker=lambda prompt: _thought(pack=pack, hypotheses=[_hyp("same idea")]),
-        tooler=[],
+        thinker=lambda prompt: (
+            _thought(need={"kind": "tool", "request": "list episodes"})
+            if "tooler -> list_episodes" not in prompt
+            else _thought(pack=pack, hypotheses=[_hyp("same idea")])
+        ),
+        tooler=lambda prompt: '{"tool": "list_episodes", "args": {"n": 1}}',
         coder=[],
     )
     runner = EnsembleRunner(roles, sup, n=2, max_rounds=2)
@@ -133,7 +139,14 @@ def test_pack_without_hypotheses_gets_a_synthesized_one(sup: Supervisor) -> None
     obs = _research(sup)
     pack = dummy_pack(obs)
     pack["hypothesis"] = "silent ensemble pack"
-    roles = Roles.scripted(thinker=[_thought(pack=pack)], tooler=[], coder=[])
+    roles = Roles.scripted(
+        thinker=[
+            _thought(need={"kind": "tool", "request": "list episodes"}),
+            _thought(pack=pack),
+        ],
+        tooler=['{"tool": "list_episodes", "args": {"n": 1}}'],
+        coder=[],
+    )
     runner = EnsembleRunner(roles, sup, n=1, max_rounds=2)
     out = runner.commit(runner.run_research(obs), obs)
     assert len(out["candidates"]) == 1 and out["fallback"] is False
@@ -213,6 +226,8 @@ def test_policy_walks_two_trials_through_the_real_supervisor(sup: Supervisor) ->
     seen_cycles: list[int] = []
 
     def thinker(prompt: str) -> str:
+        if "tooler -> list_episodes" not in prompt:
+            return _thought(need={"kind": "tool", "request": "list episodes"})
         obs = sup.observe()
         seen_cycles.append(obs["cycle"])
         for angle, steps in packs.items():
@@ -221,7 +236,11 @@ def test_policy_walks_two_trials_through_the_real_supervisor(sup: Supervisor) ->
                 return _thought(pack=pack, hypotheses=[_hyp(f"{angle} c{obs['cycle']} steps={steps}")])
         return _thought(done=True)
 
-    roles = Roles.scripted(thinker=thinker, tooler=[], coder=[])
+    roles = Roles.scripted(
+        thinker=thinker,
+        tooler=lambda prompt: '{"tool": "list_episodes", "args": {"n": 1}}',
+        coder=[],
+    )
     policy = EnsemblePolicy(roles, sup, n=2, max_rounds=3, tracer=sup.tracer)
     result = sup.run_policy(policy, max_cycles=1, max_steps=60)
     assert result["halted"] is True and result["halt_reason"] == "max_cycles reached"
@@ -238,6 +257,8 @@ def test_policy_walks_two_trials_through_the_real_supervisor(sup: Supervisor) ->
     assert tools == [
         "run_eval",
         "enter_research",
+        "list_episodes",
+        "list_episodes",
         "write_hypothesis",
         "write_pack",
         "write_hypothesis",
@@ -255,11 +276,17 @@ def test_policy_walks_two_trials_through_the_real_supervisor(sup: Supervisor) ->
 
 def test_policy_runs_research_once_per_cycle_over_two_cycles(sup: Supervisor) -> None:
     def thinker(prompt: str) -> str:
+        if "tooler -> list_episodes" not in prompt:
+            return _thought(need={"kind": "tool", "request": "list episodes"})
         obs = sup.observe()
         steps = 10 + obs["cycle"] * 2 + (1 if "Your angle: learning rate" in prompt else 0)
         return _thought(pack=dummy_pack(obs, extra_config={"steps": steps}), hypotheses=[_hyp(f"steps {steps}")])
 
-    roles = Roles.scripted(thinker=thinker, tooler=[], coder=[])
+    roles = Roles.scripted(
+        thinker=thinker,
+        tooler=lambda prompt: '{"tool": "list_episodes", "args": {"n": 1}}',
+        coder=[],
+    )
     policy = EnsemblePolicy(roles, sup, n=2, max_rounds=2)
     result = sup.run_policy(policy, max_cycles=2, max_steps=80)
     assert result["completed_cycles"] == 2

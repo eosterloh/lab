@@ -314,6 +314,15 @@ def inspect_model(sup: Any, args: Args) -> ToolResult:
     return ok(model_dir=str(path), capabilities=caps)
 
 
+def list_checkpoints(sup: Any, args: Args) -> ToolResult:
+    """{} -> the checkpoint bank. Each row is a slot a pack may name as bank:<slot>."""
+    del args
+    from lab.checkpoints import BANK_SLOTS
+
+    rows = sup.bank.entries()
+    return ok(checkpoints=rows, n=len(rows), slots=list(BANK_SLOTS))
+
+
 def read_checkpoint_meta(sup: Any, args: Args) -> ToolResult:
     """{path: str} -> config, n_params, first 20 state-dict keys; path must live under run_dir"""
     raw, e = _str_arg(args, "path")
@@ -435,10 +444,6 @@ def read_trace(sup: Any, args: Args) -> ToolResult:
             continue
         rows.append(row)
     rows = rows[-n:]
-    for row in rows:
-        for key in ("inputs", "outputs"):
-            if row.get(key) is not None:
-                row[key] = _clip(row[key], TEXT_CLIP)
     return ok(rows=rows, n=len(rows), total=total, path=str(path))
 
 
@@ -712,6 +717,7 @@ EXTRA_REGISTRY: dict[str, Handler] = {
     "list_models": list_models,
     "inspect_model": inspect_model,
     "read_checkpoint_meta": read_checkpoint_meta,
+    "list_checkpoints": list_checkpoints,
     "read_train_log": read_train_log,
     "read_trace": read_trace,
     "data_stats": data_stats,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from lab.checkpoints import bank_parent_error
 from lab.pack import ArtifactPack
 from lab.types import ToolResult, err, ok
 
@@ -219,6 +220,9 @@ def write_pack(sup: Any, args: Args) -> ToolResult:
         hypothesis_id = hypothesis_id or payload.pop("hypothesis_id")
     try:
         pack = ArtifactPack.from_dict(payload if "hypothesis" in payload else args)
+        problem = bank_parent_error(pack.parent_checkpoint, pack.stage, sup.bank)
+        if problem:
+            return err(problem)
         digest = sup.save_pack(pack, hypothesis_id=str(hypothesis_id) if hypothesis_id else None)
         return ok(pack_hash=digest, pack=pack.canonical(), hypothesis_id=sup.state.hypothesis_id)
     except Exception as e:

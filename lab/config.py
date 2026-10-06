@@ -18,7 +18,7 @@ class LabConfig:
     research_max_tool_calls: int = 50
     research_max_seconds: float = 600.0
     sandbox_max_bytes: int = 50 * 1024 * 1024
-    train_max_hours: float = 3.5
+    train_max_hours: float = 84.0
     dummy_job_seconds: float = 0.0
     fetch_max_bytes: int = 2 * 1024 * 1024
     exec_timeout_s: float = 30.0
@@ -36,6 +36,16 @@ class LabConfig:
     models_dir: Path = Path.home() / "models"
     ensembles_per_cycle: int = 3
     ensemble_max_rounds: int = 12
+    # Jev scans the trace every this many policy steps. 0 disables the stride.
+    # A terminal train job is scanned every step either way.
+    jev_every: int = 8
+    # Extra repairs (cancel a dummy job, leave a stuck eval). Entering eval
+    # after a finished job has already lingered does not consult this flag.
+    jev_apply: bool = False
+    # Train-phase tool calls allowed after the job is already finished.
+    train_tail_steps: int = 2
+    # When > 0, replaces the pack's max_hours as the running-train budget.
+    train_dwell_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir).expanduser().resolve()
@@ -77,6 +87,11 @@ class LabConfig:
             models_dir=_env_path("LAB_MODELS_DIR") or Path.home() / "models",
             ensembles_per_cycle=int(os.environ.get("LAB_ENSEMBLES", "3")),
             ensemble_max_rounds=int(os.environ.get("LAB_ENSEMBLE_ROUNDS", "12")),
+            train_max_hours=float(os.environ.get("LAB_TRAIN_MAX_HOURS", "84")),
+            jev_every=int(os.environ.get("LAB_JEV_EVERY", "8")),
+            jev_apply=os.environ.get("LAB_JEV_APPLY", "0") == "1",
+            train_tail_steps=int(os.environ.get("LAB_TRAIN_TAIL_STEPS", "2")),
+            train_dwell_seconds=float(os.environ.get("LAB_TRAIN_DWELL_SECONDS", "0")),
         )
 
     @property

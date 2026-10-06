@@ -17,7 +17,7 @@ def dummy_pack(obs: dict[str, Any], extra_config: dict[str, Any] | None = None) 
         "config": cfg,
         "data_manifest": {"sources": ["dummy://tinystories"], "unique_tokens": 0},
         "eval_suite_id": "core",
-        "eval_suite_version": 1,
+        "eval_suite_version": 2,
         "parent_checkpoint": str(obs.get("subject_checkpoint") or "subjects/tinytrain-8m"),
         "budgets": {"max_hours": 0.01, "max_steps": cfg["steps"]},
     }
@@ -42,7 +42,7 @@ def lab_pack(obs: dict[str, Any], extra_config: dict[str, Any] | None = None) ->
         "config": cfg,
         "data_manifest": {"sources": list(DEFAULT_MIX), "unique_tokens": 0},
         "eval_suite_id": "core",
-        "eval_suite_version": 1,
+        "eval_suite_version": 2,
         "parent_checkpoint": str(
             obs.get("last_checkpoint") or obs.get("subject_checkpoint") or "subjects/tinytrain-8m"
         ),

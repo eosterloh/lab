@@ -25,7 +25,7 @@ Change exactly one config key per pack. If `lr` and `steps` both change you cann
 4. Then `write_hypothesis`, `write_pack`, `enter_train`. Do not loop on reads; the research budget is finite.
 
 ## Resuming from a parent
-`parent_checkpoint = observation.last_checkpoint`. Weights load only if `hidden, layers, heads, seq_len` (and vocab=256) match the parent exactly. Changing any of them silently trains from scratch, so an architecture sweep is a from-scratch comparison, not a continuation. Say which one you are doing in the hypothesis.
+`parent_checkpoint = bank:<slot>` from `checkpoint_bank` (`best`, `latest`, `subject`, `pretrain`, `continue`, `midtrain`, `posttrain`). Weights load only if `hidden, layers, heads, seq_len` (and vocab=256) match that checkpoint. Changing any of them on `continue` starts from scratch; on `midtrain` or `posttrain` the job fails. `pretrain` ignores the weights.
 
 ## When to kill a hypothesis
 - Two consecutive packs in the same direction did not lower confirm_ppl.
@@ -39,12 +39,20 @@ Include factor, value, baseline episode, expected direction. Shape, not text to 
 - "from scratch: hidden <old>-><new>, heads <old>-><new>, <n> steps; compare to <ep> <ppl>"
 Under 120 chars; it becomes the episode title. Every bracket must be replaced by a number or id from your observation.
 
+## Train stage
+`stage` is `pretrain | continue | midtrain | posttrain`.
+- pretrain: new weights. `max_hours` up to 84. Steps may be large. The one-factor rule below does not apply.
+- continue: resume weights and Adam. Cap 84h.
+- midtrain: resume weights, fresh Adam, new mix. Cap 24h. Parent required.
+- posttrain: resume weights, fresh Adam. Cap 8h. Parent required.
+The checklist below is for a continue on the existing subject.
+
 ## Checklist before write_pack
 - [ ] `list_episodes` read this cycle; config differs from every indexed episode
 - [ ] `claim`, `why`, `falsify` written; `falsify` names a confirm_ppl threshold
 - [ ] exactly one factor changed vs the baseline episode
-- [ ] `trainer` = `lab`; `eval_suite_id` = `core`; `eval_suite_version` = 1
-- [ ] `hidden % heads == 0`; `steps == budgets.max_steps`; `max_hours <= 3.5`
+- [ ] `trainer` = `lab`; `eval_suite_id` = `core`; `eval_suite_version` = 2
+- [ ] `hidden % heads == 0`; `steps == budgets.max_steps`; `max_hours` within the stage cap (84 / 84 / 24 / 8)
 - [ ] `parent_checkpoint` = `observation.last_checkpoint` (or the subject) when resuming
 - [ ] `data_manifest.sources` = default mix unless `prefetch_data` cached more allowlisted text
 - [ ] lr in 1e-4..1e-2, steps in 8..512

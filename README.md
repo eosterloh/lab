@@ -97,6 +97,11 @@ Tests: `pytest`
 | `LANGSMITH_TRACING` | `true` mirrors spans to LangSmith (needs `pip install -e ".[trace]"`) |
 | `LANGSMITH_API_KEY` | LangSmith key; without it only the local `trace.jsonl` is written |
 | `LANGSMITH_PROJECT` | LangSmith project name (default `lab-harness`) |
+| `LAB_JEV_EVERY` | trace scan stride in policy steps (default 8; `0` disables the stride) |
+| `LAB_JEV_APPLY` | `1` allows the extra Jev repairs (dummy cancel, leave a stuck eval) |
+| `LAB_TRAIN_TAIL_STEPS` | train tool calls allowed after the job is finished (default 2) |
+| `LAB_TRAIN_DWELL_SECONDS` | when set, running-train budget in seconds instead of the pack's `max_hours` |
+| `LAB_TRAIN_MAX_HOURS` | harness ceiling in hours (default 84, which is 3.5 days) |
 
 ## Tracing
 
@@ -118,6 +123,31 @@ Policy turns carry the prompt, the raw completion, and the tool that was parsed
 out of it; tool spans carry args, the result, and the rejection reason. Cycle,
 phase, and tool are attached as both metadata and tags, so in LangSmith you can
 filter to one phase or one tool across a whole run.
+
+## Jev
+
+`lab/jev.py` reads `trace.jsonl` and decides whether the harness should repair the open phase. No model is loaded.
+
+It scans every `LAB_JEV_EVERY` policy steps (default 8) and on each phase boundary. A train phase whose job is already finished is scanned every step. Verdicts append to `jev.jsonl`. A repair also writes one notebook line.
+
+| Signal | Repair |
+|---|---|
+| Job finished, still in train after `LAB_TRAIN_TAIL_STEPS` calls (default 2) | harness calls `enter_eval` |
+| Job still running past the pack's `max_hours` (or `LAB_TRAIN_DWELL_SECONDS` when set) | recorded as `train_over_budget`. Not cancelled. `LAB_JEV_APPLY=1` may cancel a **dummy** job only |
+| Eval or research over its step cap, a burst of tool errors, or the same call five times | recorded. `LAB_JEV_APPLY=1` can leave a stuck eval that already ran `run_eval` |
+
+```bash
+python -m lab jev --run-dir runs/qwen-12
+python -m lab heal --run-dir runs/qwen-12                 # one look after the run
+python -m lab heal --run-dir runs/qwen-12 --every 30 --passes 4   # while it is running
+python -m lab dry-eval    # phases, train linger, thinker/tooler/coder; dummy trainer; private lock file
+```
+
+The healer is a second harness under `runs/<id>/healer/`. It does not take the ensemble's turns. Each look asks Jev if the trace is good. A repair writes `heal-NNNN.json` and does not change the ensemble's phase. The same finding is not written twice.
+
+## Hooks
+
+`hooks.jsonl` gets a row at `after_eval`, `before_research`, `before_train`, `before_eval`, `on_step`, and `between_trials` (another candidate is still queued). Listeners that raise are logged and swallowed. `lab/hooks.py` lists what each point is for. Not wired yet: dropping a regressed trial, rejecting a stale parent checkpoint, flagging a flat train loss, and clearing a losing candidate queue.
 
 ## Ensemble
 
@@ -150,7 +180,7 @@ Dropping in a model is one env var per role; nothing loads until the first `gene
 - Eval + research (inspect): `list_episodes`, `read_episode`, `read_hypothesis`, `list_hypotheses`, `grep_files`, `list_models`, `inspect_model`, `read_checkpoint_meta`, `read_train_log`, `read_trace`, `list_packs`, `read_pack`, `diff_packs`, `list_jobs`, `read_skill`, `list_skills`, `read_episode_metrics`, `sandbox_usage`
 - Train: `job_status`, `cancel_job`, `enter_eval`
 
-Pack fields: hypothesis, trainer (`dummy` \| `lab` \| `tinytrain`), config, data_manifest, eval_suite_id (`core`), eval_suite_version (`1`), parent_checkpoint, budgets (`max_hours` ≤ 3.5).
+Pack fields: hypothesis, trainer (`dummy` \| `lab` \| `tinytrain`), `stage` (`pretrain` \| `continue` \| `midtrain` \| `posttrain`, default `continue`), config, data_manifest, eval_suite_id (`core`), eval_suite_version (`2`), parent_checkpoint, budgets. Clock caps: pretrain and continue 84h (3.5 days), midtrain 24h, posttrain 8h. The job also stops at `config.steps`. `pretrain` starts from random init. `continue` resumes weights and Adam. `midtrain` and `posttrain` resume weights with a fresh Adam and require a parent checkpoint.
 
 Lab config keys: `lr`, `steps`, `hidden`, `layers`, `heads`, `seq_len`, `batch`. Default train mix is the allowlisted TinyStories slice, materialized into `jobs/.../data.txt` before the trainer starts. `prefetch_data` fills `LAB_DATA_CACHE`; the GPU job stays offline. Frozen eval is never a train source. Cycle N+1 copies `checkpoints/latest.pt` in as `parent.pt` so weights continue. Frozen confirm PPL is measured on the `.pt` (not trainer val). The experimenter (`--policy qwen` / `--policy nano`) defaults to Qwen3.8-27B.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -73,6 +74,39 @@ def test_armed_lab_train_job_succeeds(sup) -> None:
     assert started["job"]["status"] == "succeeded"
     assert started["job"]["metrics"]["val_ppl"] > 1
     assert started["job"]["metrics"]["resumed"] is False
+
+
+def test_a_short_clock_stops_before_the_step_ceiling(tmp_path: Path) -> None:
+    """The wall clock ends the job. A huge step count must not all run."""
+    pytest.importorskip("torch")
+    from lab.train.loop import train
+
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "data.txt").write_text("a" * 2000, encoding="utf-8")
+    pack = {
+        "hypothesis": "clock",
+        "trainer": "lab",
+        "config": {
+            "lr": 0.01,
+            "steps": 100_000,
+            "hidden": 32,
+            "layers": 1,
+            "heads": 1,
+            "seq_len": 16,
+            "batch": 8,
+        },
+        "data_manifest": {"sources": ["builtin:tiny"]},
+        "eval_suite_id": "core",
+        "eval_suite_version": 2,
+        "parent_checkpoint": "none",
+        "budgets": {"max_hours": 6 / 3600, "max_steps": 100_000},
+    }
+    (job / "pack.json").write_text(json.dumps(pack), encoding="utf-8")
+    metrics = train(job)
+    assert metrics["stop_reason"] == "max_hours"
+    assert 0 < metrics["steps"] < metrics["max_steps"]
+    assert (job / "checkpoint.pt").is_file()
 
 
 def test_lab_second_cycle_resumes_parent_and_scores_holdout(sup) -> None:

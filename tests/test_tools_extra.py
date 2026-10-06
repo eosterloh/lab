@@ -324,7 +324,7 @@ def test_read_skill_happy_path_when_module_exists(sup) -> None:
 
 def test_data_stats(sup) -> None:
     assert sup.call("enter_research")["ok"]
-    cached = sup.call("data_stats", {"source": "hf:roneneldan/TinyStories:train:10000"})
+    cached = sup.call("data_stats", {"source": "hf:roneneldan/TinyStories:train:20000"})
     assert cached["ok"] is True, cached
     assert cached["bytes"] > 0 and cached["lines"] > 0 and cached["unique_bytes"] > 0
     assert len(cached["sample"]) <= 300

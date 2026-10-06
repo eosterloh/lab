@@ -39,7 +39,7 @@ def test_prefetch_data_serves_seeded_cache(sup) -> None:
     assert sup.call("enter_research")["ok"]
     out = sup.call(
         "prefetch_data",
-        {"source": "hf:roneneldan/TinyStories", "split": "train", "n": 10000},
+        {"source": "hf:roneneldan/TinyStories", "split": "train", "n": 20000},
     )
     assert out["ok"] is True
     assert Path(out["path"]).is_file()

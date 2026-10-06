@@ -45,6 +45,7 @@ INSPECT_TOOLS = frozenset(
         "list_models",
         "inspect_model",
         "read_checkpoint_meta",
+        "list_checkpoints",
         "read_train_log",
         "read_trace",
         "list_packs",

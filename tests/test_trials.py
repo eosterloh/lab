@@ -59,6 +59,7 @@ def test_two_candidates_run_as_two_trials_in_one_cycle(sup) -> None:
     # Mid-trial research loads candidate 2 without rolling the board.
     entered = sup.call("enter_research")
     assert entered["ok"]
+    assert '"point": "between_trials"' in (sup.cfg.run_dir / "hooks.jsonl").read_text()
     assert entered["trial"] == 2
     obs = sup.observe()
     assert obs["cycle"] == 1

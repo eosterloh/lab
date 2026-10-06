@@ -47,6 +47,15 @@ def _hyp(claim: str = "more steps lower confirm_ppl") -> dict:
     return {"claim": claim, "why": "undertrained", "falsify": "confirm_ppl does not drop"}
 
 
+_LIST = '{"tool": "list_episodes", "args": {"n": 1}}'
+
+
+def _handoff(*later: str) -> tuple[list[str], list[str]]:
+    """A finished tool round, then the replies the test actually cares about."""
+    ask = _thought(need={"kind": "tool", "request": "list episodes"})
+    return [ask, *later], [_LIST]
+
+
 def _ens(sup: Supervisor, roles: Roles, **cfg_kw) -> Ensemble:
     cfg_kw.setdefault("variant_hint", "training steps")
     cfg = EnsembleConfig(index=1, **cfg_kw)
@@ -110,6 +119,18 @@ def test_prompts_mention_angle_and_digest_fields(sup: Supervisor) -> None:
 
 
 # ---------------------------------------------------------------------- loop
+
+
+def test_a_pack_before_any_handoff_is_refused(sup: Supervisor) -> None:
+    obs = _research(sup)
+    roles = Roles.scripted(
+        thinker=[_thought(pack=_pack(obs)), _thought(done=True)],
+        tooler=[],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    assert res.pack is None
+    assert any("Pass the work on" in (t.result or {}).get("error", "") for t in res.transcript)
 
 
 def test_thinker_asks_tool_then_emits_pack(sup: Supervisor) -> None:
@@ -209,28 +230,30 @@ def test_invalid_pack_is_fed_back_then_valid_pack_succeeds(sup: Supervisor) -> N
     obs = _research(sup)
     bad = _pack(obs)
     bad["trainer"] = "nope"
-    roles = Roles.scripted(thinker=[_thought(pack=bad), _thought(pack=_pack(obs))], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(pack=bad), _thought(pack=_pack(obs)))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
     assert res.error is None and res.pack is not None
-    assert res.rounds == 2 and res.nudges == 1
-    synthetic = res.transcript[1]
-    assert synthetic.role == "harness" and "trainer" in synthetic.result["error"]
-    assert "pack rejected" in roles.backend("thinker").prompts[1]
+    assert res.nudges == 1
+    synthetic = next(t for t in res.transcript if t.role == "harness")
+    assert "trainer" in synthetic.result["error"]
+    assert any("pack rejected" in p for p in roles.backend("thinker").prompts)
 
 
 def test_a_thinker_with_no_hypothesis_still_gets_the_template_nudge(sup: Supervisor) -> None:
     """With a hypothesis the harness runs a focused fill turn; with nothing at
     all there is nothing to fill from, so the nudge carries the template."""
     obs = _research(sup)
-    roles = Roles.scripted(thinker=[_thought(), _thought(pack=_pack(obs))], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(), _thought(pack=_pack(obs)))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
     assert res.error is None and res.pack is not None and res.nudges == 1
 
-    nudge = res.transcript[1].result["error"]
+    nudge = next(t for t in res.transcript if t.role == "harness").result["error"]
     assert "emitted no pack" in nudge
     template = parse_json_object(nudge[nudge.index("{") :])
     assert template["parent_checkpoint"] == (obs["last_checkpoint"] or obs["subject_checkpoint"])
-    assert nudge in roles.backend("thinker").prompts[1]
+    assert any(nudge in p for p in roles.backend("thinker").prompts)
 
 
 def test_the_fill_template_carries_the_runs_real_parent_checkpoint(sup: Supervisor) -> None:
@@ -262,12 +285,16 @@ def test_the_angles_knob_is_a_placeholder_the_model_must_fill(sup: Supervisor) -
     copied = pack_template(obs, "lr 1.5e-3 lowers confirm_ppl", knob="lr")
     filled = json.loads(json.dumps(copied))
     filled["config"]["lr"] = 0.0015
-    roles = Roles.scripted(thinker=[_thought(pack=copied), _thought(pack=filled)], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(pack=copied), _thought(pack=filled))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     cfg = EnsembleConfig(index=1, variant_hint="learning rate")
     res = Ensemble(roles, sup, cfg, call_lock=threading.Lock(), tracer=sup.tracer).run(obs)
 
     assert res.error is None and res.pack["config"]["lr"] == 0.0015
-    assert "config.lr still holds a placeholder" in res.transcript[1].result["error"]
+    assert any(
+        "config.lr still holds a placeholder" in (t.result or {}).get("error", "")
+        for t in res.transcript
+    )
 
 
 def test_a_hypothesis_without_a_pack_triggers_a_focused_fill_turn(sup: Supervisor) -> None:
@@ -280,15 +307,14 @@ def test_a_hypothesis_without_a_pack_triggers_a_focused_fill_turn(sup: Superviso
     claim = "steps 64->128 vs the parent; expect lower"
     filled = pack_template(obs, claim, knob="steps")
     filled["config"]["steps"] = 128
-    roles = Roles.scripted(
-        thinker=[_thought(hypotheses=[_hyp(claim)]), json.dumps(filled)], tooler=[], coder=[]
-    )
+    thinker, tooler = _handoff(_thought(hypotheses=[_hyp(claim)]), json.dumps(filled))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
 
     assert res.error is None and res.pack["config"]["steps"] == 128
     fill = res.transcript[-1]
     assert fill.role == "thinker" and fill.tool == "pack_fill"
-    prompt = roles.backend("thinker").prompts[1]
+    prompt = roles.backend("thinker").prompts[-1]
     assert prompt.startswith("Fill in one ArtifactPack")
     assert claim in prompt and '"config.steps" to the number' in prompt
     # the fill turn asks for a bare object, not another Thought
@@ -302,16 +328,13 @@ def test_a_fill_turn_that_keeps_the_placeholder_is_refused(sup: Supervisor) -> N
     copied = pack_template(obs, "steps 64->128", knob="steps")
     # each round is one Thought call plus, when that thought has a hypothesis
     # and no pack, one fill call
-    roles = Roles.scripted(
-        thinker=[
-            _thought(hypotheses=[_hyp("steps 64->128")]),
-            json.dumps(copied),
-            _thought(),
-            "not json",
-        ],
-        tooler=[],
-        coder=[],
+    thinker, tooler = _handoff(
+        _thought(hypotheses=[_hyp("steps 64->128")]),
+        json.dumps(copied),
+        _thought(),
+        "not json",
     )
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
     assert res.pack is None and sup.observe()["pack_hash"] is None
     errors = [str(t.result.get("error", "")) for t in res.transcript if t.result]
@@ -334,7 +357,8 @@ def test_a_quoted_number_is_coerced_not_passed_to_the_trainer(sup: Supervisor) -
     _, err = coerce_config_numbers(dict(pack, config={"lr": "fast"}))
     assert err is not None and "not a number" in err
 
-    roles = Roles.scripted(thinker=[_thought(pack=pack)], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(pack=pack))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
     assert res.pack["config"]["lr"] == 0.01
 
@@ -398,10 +422,15 @@ def test_every_problem_with_a_pack_is_reported_at_once(sup: Supervisor) -> None:
     claim = "lr 0.01->0.001, vs baseline ep (confirm_ppl 0.85)"
     bad = _pack(obs)
     bad["config"]["lr"] = 0.01
-    roles = Roles.scripted(thinker=[_thought(hypotheses=[_hyp(claim)], pack=bad)], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(hypotheses=[_hyp(claim)], pack=bad))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles, variant_hint="learning rate").run(obs)
 
-    refusal = res.transcript[1].result["error"]
+    refusal = next(
+        t.result["error"]
+        for t in res.transcript
+        if t.role == "harness" and "Set config.lr" in (t.result or {}).get("error", "")
+    )
     assert "Set config.lr to 0.001" in refusal and "nothing has been scored" in refusal
 
 
@@ -481,16 +510,13 @@ def test_template_returned_verbatim_is_sent_back_once(sup: Supervisor) -> None:
     obs = _research(sup)
     tpl = pack_template(obs, "lr 1.5e-3 lowers confirm_ppl")
     edited = dict(tpl, config=dict(tpl["config"], lr=0.0015))
-    roles = Roles.scripted(
-        thinker=[
-            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
-            json.dumps(tpl),
-            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
-            json.dumps(edited),
-        ],
-        tooler=[],
-        coder=[],
+    thinker, tooler = _handoff(
+        _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+        json.dumps(tpl),
+        _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+        json.dumps(edited),
     )
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles, variant_hint=hint).run(obs)
     assert res.error is None and res.pack["config"]["lr"] == 0.0015
     assert res.nudges == 2
@@ -499,16 +525,13 @@ def test_template_returned_verbatim_is_sent_back_once(sup: Supervisor) -> None:
     )
 
     # a stubborn thinker is refused once, then its template pack is taken
-    stubborn = Roles.scripted(
-        thinker=[
-            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
-            json.dumps(tpl),
-            _thought(hypotheses=[_hyp("lr 1.5e-3")]),
-            json.dumps(tpl),
-        ],
-        tooler=[],
-        coder=[],
+    thinker, tooler = _handoff(
+        _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+        json.dumps(tpl),
+        _thought(hypotheses=[_hyp("lr 1.5e-3")]),
+        json.dumps(tpl),
     )
+    stubborn = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res2 = _ens(sup, stubborn, variant_hint=hint).run(obs)
     assert res2.error is None and res2.pack is not None
 
@@ -517,7 +540,8 @@ def test_pack_with_hypothesis_id_key_is_accepted(sup: Supervisor) -> None:
     obs = _research(sup)
     pack = _pack(obs)
     pack["hypothesis_id"] = "hyp-0001"
-    roles = Roles.scripted(thinker=[_thought(pack=pack)], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(pack=pack))
+    roles = Roles.scripted(thinker=thinker, tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
     assert res.pack is not None and "hypothesis_id" not in res.pack
 
@@ -535,10 +559,11 @@ def test_unparseable_thinker_twice_sets_error_without_raising(sup: Supervisor) -
 
 def test_unparseable_once_then_recovers(sup: Supervisor) -> None:
     obs = _research(sup)
-    roles = Roles.scripted(thinker=["???", _thought(pack=_pack(obs))], tooler=[], coder=[])
+    thinker, tooler = _handoff(_thought(pack=_pack(obs)))
+    roles = Roles.scripted(thinker=["???", *thinker], tooler=tooler, coder=[])
     res = _ens(sup, roles).run(obs)
     assert res.error is None and res.pack is not None
-    assert [t.parsed_ok for t in res.transcript] == [False, True]
+    assert res.transcript[0].parsed_ok is False
 
 
 def test_role_not_configured_is_recorded_not_raised(sup: Supervisor) -> None:

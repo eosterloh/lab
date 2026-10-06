@@ -27,7 +27,8 @@ ALLOWLIST: dict[str, SourceSpec] = {
 }
 
 DEFAULT_MIX: tuple[str, ...] = (
-    "hf:roneneldan/TinyStories:train:10000",
+    "hf:roneneldan/TinyStories:train:20000",
+    "hf:HuggingFaceFW/fineweb-edu:train:4000",
 )
 
 # First shard to materialize n rows without resolving the whole dataset.

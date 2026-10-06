@@ -6,21 +6,24 @@ import json
 import time
 
 from lab import actions
-from lab.config import LabConfig
+from lab.checkpoints import CheckpointBank, bank_parent_error
+from lab.data_cache import list_cache
 from lab.episodes import EpisodeStore
 from lab.evals import install_frozen_eval, run_eval
 from lab.gpu import GpuLock
+from lab.hooks import HookBus, install_default_hooks
 from lab.http import Transport
 from lab.hypothesis import HypothesisBoard, HypothesisStore, LiveHypothesis
+from lab.jev import classify
 from lab.jobs import Job, JobManager
 from lab.notebook import Notebook
 from lab.pack import ArtifactPack, PackStore
 from lab.sandbox import Sandbox
 from lab.scorer import Scorer
 from lab.state import RunState
+from lab.trace_report import load_trace
 from lab.tracing import CHAIN, TOOL, Tracer
 from lab.types import PHASE_TOOLS, Phase, ToolResult, err, ok
-from lab.data_cache import list_cache
 
 FINISHED = {"succeeded", "failed", "cancelled"}
 
@@ -52,8 +55,17 @@ class Supervisor:
         self.sandbox = Sandbox(cfg, transport=transport)
         self.gpu = GpuLock(cfg.gpu_lock_path)
         self.tracer = tracer or Tracer(cfg.run_dir / "trace.jsonl")
+        resumed = cfg.state_path.is_file()
         self.state = self._load_state()
+        if self.state.phase_entered_at is None and not resumed:
+            self.state.phase_entered_at = time.time()
+        self.hooks = HookBus(cfg.run_dir / "hooks.jsonl")
+        self._jev_verdict: dict[str, Any] | None = None
+        self._jev_noted: set[tuple[Any, str]] = set()
+        install_default_hooks(self)
         self.board = HypothesisBoard(cfg.run_dir / "hypotheses")
+        self.bank = CheckpointBank(cfg.checkpoints_dir)
+        self.bank.ensure_subject(cfg.subject_checkpoint)
         # Single-hypothesis view (``sup.hypothesis.current`` etc.) over the board.
         self.hypothesis = HypothesisStore(
             cfg.hypothesis_path,
@@ -114,6 +126,7 @@ class Supervisor:
             "last_metrics": self.state.last_metrics,
             "subject_checkpoint": self.cfg.subject_checkpoint,
             "last_checkpoint": self._last_checkpoint(),
+            "checkpoint_bank": self.bank.entries(),
             "episodes": self.episodes.summaries(n=8),
             "hypothesis": self.current_hypothesis.summary(),
             "hypotheses": self.board.summary(cycle=self.state.cycle),
@@ -362,6 +375,7 @@ class Supervisor:
         job = self.jobs.store.load(self.state.current_job_id) if self.state.current_job_id else None
         if job is not None and job.status in FINISHED and pack is not None:
             self._seal_trial(pack, job, result)
+        self._hook("after_eval")
         return result
 
     def _seal_trial(self, pack: ArtifactPack, job: Job, result: dict[str, Any]) -> None:
@@ -400,6 +414,9 @@ class Supervisor:
             self.board.link_episode(hyp_id, ep["id"], supporting=supporting)
             if result.get("confirm_source") and result.get("confirm_source") != "trainer_val_proxy":
                 self.board.mark(hyp_id, "holdout_not_proxy", True)
+        ckpt = self.cfg.checkpoints_dir / f"{job.id}.pt"
+        if ckpt.is_file():
+            self.bank.note_score(job_id=job.id, confirm_ppl=confirm)
         self.state.trial_results.append(
             {
                 "trial": self.state.trial,
@@ -438,6 +455,13 @@ class Supervisor:
         )
 
     def transition_research(self) -> ToolResult:
+        if self.state.candidate_queue:
+            self._hook(
+                "between_trials",
+                to="research",
+                candidates_left=len(self.state.candidate_queue),
+            )
+        self._hook("before_research", to="research")
         # Mid-trial research is distinguished by a non-empty candidate_queue:
         # queue_candidates loads the first candidate and queues the rest, and
         # each enter_research after a sealed trial pops the next one. The board
@@ -467,6 +491,7 @@ class Supervisor:
             text = "entered research"
             if killed:
                 text += f"; killed untested {', '.join(killed)}"
+        self.state.phase_entered_at = time.time()
         self.notebook.append(
             cycle=self.state.cycle,
             phase=self.state.phase,
@@ -495,6 +520,7 @@ class Supervisor:
         pack = self.packs.load(self.state.pack_hash)
         if pack.budgets.max_hours > self.cfg.train_max_hours:
             return err("pack budget exceeds harness train_max_hours")
+        self._hook("before_train", to="train")
         if not self.gpu.acquire(blocking=False):
             return err("gpu lock held")
         self.state.gpu_held = True
@@ -502,6 +528,7 @@ class Supervisor:
         self.state.current_job_id = job.id
         self.state.last_metrics = job.metrics or None
         self.state.phase = Phase.TRAIN.value
+        self.state.phase_entered_at = time.time()
         self.state.research_started_at = None
         self.notebook.append(
             cycle=self.state.cycle,
@@ -534,6 +561,7 @@ class Supervisor:
         job = self.poll_job()
         if job and job.status == "running":
             return err("job still running")
+        self._hook("before_eval", to="eval")
         if self.gpu.held:
             self.gpu.release()
             self.state.gpu_held = False
@@ -551,6 +579,7 @@ class Supervisor:
                 self.state.completed_cycles += 1
                 self.state.cycle += 1
         self.state.phase = Phase.EVAL.value
+        self.state.phase_entered_at = time.time()
         self.state.eval_ran_this_phase = False
         self.state.research_started_at = None
         self.state.research_tool_calls = 0
@@ -570,6 +599,223 @@ class Supervisor:
             trials_planned=self.state.trials_planned,
             candidates_left=len(self.state.candidate_queue),
         )
+
+    def _hook(self, point: str, **extra: Any) -> None:
+        ctx = {
+            "point": point,
+            "cycle": self.state.cycle,
+            "phase": self.state.phase,
+            "trial": self.state.trial,
+            "eval_ran": self.state.eval_ran_this_phase,
+            "pack_hash": self.state.pack_hash,
+            **extra,
+        }
+        try:
+            self.hooks.fire(point, ctx)
+        except Exception:
+            return
+
+    def _stored_job(self) -> Job | None:
+        if not self.state.current_job_id:
+            return None
+        try:
+            return self.jobs.store.load(self.state.current_job_id)
+        except Exception:
+            return None
+
+    def _train_budget_s(self) -> float | None:
+        if self.cfg.train_dwell_seconds > 0:
+            return float(self.cfg.train_dwell_seconds)
+        if self.state.pack_hash and self.packs.exists(self.state.pack_hash):
+            return float(self.packs.load(self.state.pack_hash).budgets.max_hours) * 3600.0
+        return float(self.cfg.train_max_hours) * 3600.0
+
+    def scan_jev(self, reason: str) -> dict[str, Any]:
+        """Classify the trace. Failures become a non-repair verdict, never a crash."""
+        try:
+            return self._scan_jev(reason)
+        except Exception as exc:
+            verdict = {
+                "repair": False,
+                "action": None,
+                "phase": self.state.phase,
+                "cycle": self.state.cycle,
+                "scanned": 0,
+                "train_steps": 0,
+                "findings": [],
+                "reason": reason,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self._jev_verdict = verdict
+            return verdict
+
+    def _scan_jev(self, reason: str) -> dict[str, Any]:
+        verdict = classify(
+            load_trace(self.cfg.run_dir),
+            research_cap=self.cfg.research_max_tool_calls,
+            train_tail_steps=self.cfg.train_tail_steps,
+            train_budget_s=self._train_budget_s(),
+            phase_entered_at=self.state.phase_entered_at,
+            now=time.time(),
+        )
+        self._overlay_live_job(verdict)
+        verdict["findings"].extend(self._context_findings(reason))
+        verdict["repair"] = any(f.get("severity") == "repair" for f in verdict["findings"])
+        verdict["reason"] = reason
+        verdict["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._jev_verdict = verdict
+        if verdict["findings"] or verdict["scanned"]:
+            self._append_jev(verdict)
+        for finding in verdict["findings"]:
+            if finding.get("severity") != "repair":
+                continue
+            key = (self.state.cycle, str(finding.get("code")))
+            if key in self._jev_noted:
+                continue
+            self._jev_noted.add(key)
+            self.notebook.append(
+                cycle=self.state.cycle,
+                phase=self.state.phase,
+                kind="jev",
+                text=f"Jev: {finding.get('code')}: {finding.get('detail')}",
+            )
+        return verdict
+
+    def _overlay_live_job(self, verdict: dict[str, Any]) -> None:
+        """Job status from the job file, used when the trace row has no job object."""
+        if self.state.phase != "train":
+            return
+        job = self._stored_job()
+        if job is None:
+            return
+        codes = {f.get("code") for f in verdict["findings"]}
+        steps = int(verdict.get("train_steps") or 0)
+        if (
+            job.status in FINISHED
+            and steps >= self.cfg.train_tail_steps
+            and "train_linger" not in codes
+        ):
+            verdict["findings"].append(
+                {
+                    "code": "train_linger",
+                    "severity": "repair",
+                    "phase": "train",
+                    "cycle": self.state.cycle,
+                    "detail": (
+                        f"job is {job.status} and train still has {steps} tool calls "
+                        f"(cap {self.cfg.train_tail_steps})"
+                    ),
+                }
+            )
+            verdict["phase"] = "train"
+            verdict["action"] = "enter_eval"
+            verdict["job_status"] = job.status
+        budget = self._train_budget_s()
+        entered = self.state.phase_entered_at
+        if (
+            job.status == "running"
+            and budget
+            and entered is not None
+            and "train_over_budget" not in codes
+            and time.time() - entered > budget
+        ):
+            dwell = time.time() - entered
+            verdict["findings"].append(
+                {
+                    "code": "train_over_budget",
+                    "severity": "repair",
+                    "phase": "train",
+                    "cycle": self.state.cycle,
+                    "detail": f"train has been open {dwell:.0f}s, budget {budget:.0f}s",
+                }
+            )
+            verdict["phase"] = "train"
+            if verdict.get("action") is None:
+                verdict["action"] = "cancel_job"
+
+    def _context_findings(self, reason: str) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        if reason == "before_research" and not self.state.eval_ran_this_phase:
+            mid = bool(self.state.candidate_queue) or self.state.trial > 1
+            if not mid:
+                findings.append(
+                    {
+                        "code": "skipped_eval",
+                        "severity": "warn",
+                        "phase": self.state.phase,
+                        "cycle": self.state.cycle,
+                        "detail": "enter_research before run_eval",
+                    }
+                )
+        if reason == "after_eval" and self.state.pack_hash and self.packs.exists(self.state.pack_hash):
+            ev = self.state.last_eval or {}
+            pack = self.packs.load(self.state.pack_hash)
+            if ev.get("confirm_source") == "trainer_val_proxy" and pack.trainer != "dummy":
+                findings.append(
+                    {
+                        "code": "holdout_proxy",
+                        "severity": "warn",
+                        "phase": self.state.phase,
+                        "cycle": self.state.cycle,
+                        "detail": (
+                            f"trainer {pack.trainer} scored confirm from trainer val, "
+                            "not the frozen holdout"
+                        ),
+                    }
+                )
+        return findings
+
+    def _append_jev(self, verdict: dict[str, Any]) -> None:
+        path = self.cfg.run_dir / "jev.jsonl"
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(verdict, default=str) + "\n")
+        except Exception:
+            return
+
+    def _maybe_scan(self, steps: int) -> None:
+        every = self.cfg.jev_every
+        stride = every > 0 and steps % every == 0
+        job = self._stored_job()
+        watch = self.state.phase == "train" and job is not None and job.status in FINISHED
+        if not stride and not watch:
+            return
+        self.scan_jev(reason="train_watch" if watch else "periodic")
+
+    def _jev_override(self) -> tuple[str, dict[str, Any]] | None:
+        """Apply a repair the policy is not making.
+
+        Leaving train after the job is finished is always applied: it does not
+        touch a running GPU job. Cancel, and forcing research, require
+        ``jev_apply`` and never cancel a non-dummy backend.
+        """
+        verdict = self._jev_verdict
+        if not verdict or not verdict.get("repair"):
+            return None
+        if verdict.get("phase") != self.state.phase:
+            return None
+        action = verdict.get("action")
+        if action == "enter_eval" and self.state.phase == "train":
+            job = self._stored_job()
+            if job is None or job.status in FINISHED:
+                self._jev_verdict = None
+                return "enter_eval", {}
+            return None
+        if not self.cfg.jev_apply:
+            return None
+        if (
+            action == "enter_research"
+            and self.state.phase == "eval"
+            and self.state.eval_ran_this_phase
+        ):
+            self._jev_verdict = None
+            return "enter_research", {}
+        if action == "cancel_job" and self.state.phase == "train":
+            job = self._stored_job()
+            if job is not None and job.status == "running" and job.backend == "dummy":
+                self._jev_verdict = None
+                return "cancel_job", {}
+        return None
 
     def run_policy(
         self,
@@ -596,18 +842,29 @@ class Supervisor:
                     self.halt("max_cycles reached")
                     break
                 self.tracer.enter_cycle(self.state.cycle)
+                self._maybe_scan(steps)
+                self._hook("on_step", step=steps)
                 phase = self.state.phase
+                override = self._jev_override()
                 with self.tracer.span(
                     f"step {steps + 1}",
                     kind=CHAIN,
                     metadata={"cycle": self.state.cycle, "phase": phase},
                 ) as step_span:
-                    name, args = policy.act(obs)
+                    if override is not None:
+                        name, args = override
+                    else:
+                        name, args = policy.act(obs)
                     with self.tracer.span(
                         f"tool.{name}",
                         kind=TOOL,
                         inputs=args,
-                        metadata={"cycle": self.state.cycle, "phase": phase, "tool": name},
+                        metadata={
+                            "cycle": self.state.cycle,
+                            "phase": phase,
+                            "tool": name,
+                            **({"jev": True} if override is not None else {}),
+                        },
                     ) as tool_span:
                         result = self.call(name, args)
                         tool_span.set(

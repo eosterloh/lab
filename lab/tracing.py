@@ -6,6 +6,9 @@ spans when langsmith is installed and LANGSMITH_TRACING=true, which is what
 gives the run a browsable tree.
 
 Nothing here may break a run: if a sink raises, the span still closes.
+Inputs and outputs are stored whole. A role prompt is the exception: the
+preamble, tool catalog, and skill text are replaced with the marker
+``system``, and the observation, request, and transcript stay.
 """
 
 from __future__ import annotations
@@ -35,20 +38,83 @@ def langsmith_enabled() -> bool:
     return True
 
 
-def _clip(value: Any, limit: int = 2000) -> Any:
-    """Keep payloads small enough to read; traces are for humans."""
+# Stored in place of a role preamble, tool catalog, or skill file. The
+# observation, transcript, request, and the model's reply stay intact so a
+# later flywheel can train on the turn without memorizing the harness prompt.
+SYSTEM_MARKER = "system"
+
+_ROLE_STARTS = (
+    "You are the THINKER",
+    "You are the TOOLER",
+    "You are the CODER",
+    "You are the experimenter",
+    "Fill in one ArtifactPack",
+)
+
+
+def _looks_like_role_prompt(text: str) -> bool:
+    return text.startswith(_ROLE_STARTS)
+
+
+def _section(text: str, start: str, stops: tuple[str, ...]) -> str | None:
+    i = text.find(start)
+    if i < 0:
+        return None
+    rest = text[i:]
+    end = len(rest)
+    for stop in stops:
+        j = rest.find(stop, len(start))
+        if j != -1:
+            end = min(end, j)
+    return rest[:end].rstrip()
+
+
+def redact_system(text: str) -> str:
+    """Replace a harness system prompt with the marker ``system``.
+
+    A string that is not a role prompt is returned unchanged, so tool
+    results and model completions are not touched.
+    """
+    if not _looks_like_role_prompt(text):
+        return text
+    if text.startswith("You are the experimenter"):
+        idx = text.find("\nphase=")
+        if idx == -1:
+            return SYSTEM_MARKER
+        return f"{SYSTEM_MARKER}\n\n{text[idx + 1:]}"
+    chunks: list[str] = []
+    request = _section(text, "request: ", ("\n",))
+    if request:
+        chunks.append(request)
+    claim = _section(text, "Your claim: ", ("\n",))
+    if claim:
+        chunks.append(claim)
+    observation = _section(
+        text,
+        "observation:\n",
+        ("\ntranscript (last 6 turns):", "\n# "),
+    )
+    if observation:
+        chunks.append(observation)
+    transcript = _section(text, "transcript (last 6 turns):\n", ("\n# ",))
+    if transcript:
+        chunks.append(transcript)
+    if not chunks:
+        return SYSTEM_MARKER
+    return SYSTEM_MARKER + "\n\n" + "\n\n".join(chunks)
+
+
+def for_trace(value: Any) -> Any:
+    """JSON-ready payload. No length cap. Role prompts become ``system`` plus the turn."""
     if value is None:
         return None
-    try:
-        text = json.dumps(value, default=str)
-    except Exception:
-        text = str(value)
-    if len(text) <= limit:
-        try:
-            return json.loads(text)
-        except Exception:
-            return text
-    return text[: limit - 3] + "..."
+    if isinstance(value, str):
+        return redact_system(value)
+    if isinstance(value, dict):
+        return {str(k): for_trace(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [for_trace(v) for v in value]
+    return value
 
 
 class Span:
@@ -138,7 +204,7 @@ class Tracer:
                     ls_trace(
                         name=name,
                         run_type=kind,
-                        inputs={"input": _clip(inputs)} if inputs is not None else {},
+                        inputs={"input": for_trace(inputs)} if inputs is not None else {},
                         project_name=self.project,
                         metadata=span.metadata,
                         tags=[f"{k}:{v}" for k, v in span.metadata.items() if k in {"phase", "cycle", "tool"}],
@@ -158,7 +224,7 @@ class Tracer:
             if run_tree is not None:
                 try:
                     run_tree.end(
-                        outputs={"output": _clip(span.outputs)},
+                        outputs={"output": for_trace(span.outputs)},
                         error=span.error,
                         metadata=span.metadata,
                     )
@@ -175,8 +241,8 @@ class Tracer:
                     "kind": kind,
                     "ok": span.error is None,
                     "error": span.error,
-                    "inputs": _clip(inputs, 600),
-                    "outputs": _clip(span.outputs, 600),
+                    "inputs": for_trace(inputs),
+                    "outputs": for_trace(span.outputs),
                     **span.metadata,
                 }
             )

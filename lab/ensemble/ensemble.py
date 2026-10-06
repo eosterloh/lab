@@ -19,6 +19,7 @@ from lab.ensemble.prompts import (
     coder_prompt,
     coerce_config_numbers,
     knob_for_hint,
+    PASS_ON,
     pack_fill_prompt,
     pack_nudge,
     pack_tests_claim,
@@ -168,6 +169,15 @@ class Ensemble:
                         break
                     absorb_err = self._absorb_hypotheses(thought, res)
 
+                    if thought.pack is not None and not _passed_on(res):
+                        res.nudges += 1
+                        self._synthetic(res, r, PASS_ON)
+                        span.set(outputs={"pack_error": "pass on first"})
+                        if res.nudges >= MAX_NUDGES:
+                            res.error = "thinker: no progress after 3 nudges"
+                            break
+                        continue
+
                     if thought.pack is not None:
                         claim = res.hypotheses[-1]["claim"] if res.hypotheses else None
                         checked, pack_err = self._validate_pack(thought.pack, claim=claim, obs=obs)
@@ -219,6 +229,13 @@ class Ensemble:
                     if absorb_err:
                         self._synthetic(res, r, absorb_err)
                         span.set(outputs={"nudge": res.nudges, "why": "placeholder claim"})
+                        if res.nudges >= MAX_NUDGES:
+                            res.error = "thinker: no progress after 3 nudges"
+                            break
+                        continue
+                    if res.hypotheses and not _passed_on(res):
+                        self._synthetic(res, r, PASS_ON)
+                        span.set(outputs={"nudge": res.nudges, "why": "pass on"})
                         if res.nudges >= MAX_NUDGES:
                             res.error = "thinker: no progress after 3 nudges"
                             break
@@ -478,7 +495,11 @@ class Ensemble:
     def _is_template(self, pack: dict[str, Any], obs: dict[str, Any]) -> bool:
         """True when the pack's experimental content equals the nudge template."""
         tpl = pack_template(obs, knob=self._knob)
-        return pack.get("config") == tpl["config"] and pack.get("data_manifest") == tpl["data_manifest"]
+        return (
+            pack.get("config") == tpl["config"]
+            and pack.get("data_manifest") == tpl["data_manifest"]
+            and str(pack.get("stage") or "continue") == str(tpl.get("stage") or "continue")
+        )
 
     def _validate_pack(
         self,
@@ -550,6 +571,11 @@ class Ensemble:
                 round=r,
             )
         )
+
+
+def _passed_on(res: EnsembleResult) -> bool:
+    """True once the tooler or the coder has actually run."""
+    return res.tool_calls > 0 or res.code_runs > 0
 
 
 def _parsed_label(role: str, raw: str) -> str | None:

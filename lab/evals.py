@@ -12,7 +12,7 @@ from lab.scorer import Scorer, load_scorer, mean_nll, ppl
 
 SUITE_DIR = Path(__file__).parent / "data" / "frozen_eval"
 DEFAULT_SUITE_ID = "core"
-DEFAULT_SUITE_VERSION = 1
+DEFAULT_SUITE_VERSION = 2
 
 
 def install_frozen_eval(dest: Path) -> None:

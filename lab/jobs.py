@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+from lab.checkpoints import CheckpointBank
 from lab.config import LabConfig
 from lab.data_cache import materialize_sources
 from lab.pack import ArtifactPack
@@ -18,10 +19,17 @@ from lab.train import BUILTIN_CORPUS, run_train_job
 
 
 def resolve_lab_parent(pack: ArtifactPack, cfg: LabConfig) -> Path | None:
+    bank = CheckpointBank(cfg.checkpoints_dir)
     for raw in (pack.parent_checkpoint, pack.config.get("checkpoint"), pack.config.get("parent")):
         if not raw:
             continue
-        path = Path(str(raw)).expanduser()
+        text = str(raw).strip()
+        if text.startswith("bank:"):
+            found = bank.resolve(text)
+            if found is None:
+                raise FileNotFoundError(f"checkpoint {text} is empty")
+            return found
+        path = Path(text).expanduser()
         if path.is_file():
             return path
     ckpts = sorted(p for p in cfg.checkpoints_dir.glob("job-*.pt") if p.is_file())
@@ -183,10 +191,20 @@ class JobManager:
             return job
         if any(s in {"builtin:tiny", "dummy://tinystories"} for s in sources):
             shutil.copyfile(BUILTIN_CORPUS, job_dir / "corpus.txt")
-        parent = resolve_lab_parent(pack, self.cfg)
-        if parent is not None:
-            shutil.copy2(parent, job_dir / "parent.pt")
-        timeout_s = max(30.0, float(pack.budgets.max_hours) * 3600.0)
+        if pack.stage != "pretrain":
+            try:
+                parent = resolve_lab_parent(pack, self.cfg)
+            except FileNotFoundError as e:
+                job.status = "failed"
+                job.error = str(e)
+                job.ended_at = _now()
+                log_path.write_text(job.error + "\n", encoding="utf-8")
+                self.store.save(job)
+                return job
+            if parent is not None:
+                shutil.copy2(parent, job_dir / "parent.pt")
+        # A minute past the budget so the trainer can write the checkpoint after the clock.
+        timeout_s = max(30.0, float(pack.budgets.max_hours) * 3600.0 + 60.0)
         job.command = [sys.executable, "-m", "lab.train", "--job-dir", str(job_dir)]
         try:
             proc = run_train_job(job_dir, timeout_s=timeout_s)
@@ -201,7 +219,7 @@ class JobManager:
         if proc.returncode == 0 and metrics_path.is_file():
             job.metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
             job.status = "succeeded"
-            self._publish_checkpoint(job, job_dir)
+            self._publish_checkpoint(job, job_dir, pack)
         else:
             job.status = "failed"
             tail = ""
@@ -211,7 +229,7 @@ class JobManager:
         self.store.save(job)
         return job
 
-    def _publish_checkpoint(self, job: Job, job_dir: Path) -> None:
+    def _publish_checkpoint(self, job: Job, job_dir: Path, pack: ArtifactPack) -> None:
         src = job_dir / "checkpoint.pt"
         if not src.is_file():
             return
@@ -220,6 +238,12 @@ class JobManager:
         dest = dest_dir / f"{job.id}.pt"
         shutil.copy2(src, dest)
         shutil.copy2(src, dest_dir / "latest.pt")
+        CheckpointBank(self.cfg.checkpoints_dir).note_train(
+            path=dest,
+            stage=pack.stage,
+            job_id=job.id,
+            config=pack.config,
+        )
         if job.metrics is not None:
             job.metrics["checkpoint"] = str(src)
             job.metrics["run_checkpoint"] = str(dest)

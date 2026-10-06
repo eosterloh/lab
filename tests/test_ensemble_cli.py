@@ -25,24 +25,36 @@ def _offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAB_DATA_CACHE", str(cache))
 
 
-def _thought(**kw) -> dict:
-    base = {"thought": "", "hypotheses": [], "need": None, "pack": None, "done": False}
-    base.update(kw)
-    return base
-
-
 def _scripted_roles(path: Path) -> Path:
+    """Tool, then a pack. A pack on the first thinker turn is refused."""
     obs = {"cycle": 1, "subject_checkpoint": "subjects/tinytrain-8m"}
-    thinker = []
-    for steps, claim in ((12, "twelve steps"), (40, "forty steps")):
-        pack = dummy_pack(obs, extra_config={"steps": steps})
-        pack["hypothesis"] = f"ensemble pack {claim}"
-        thinker.append(_thought(pack=pack, hypotheses=[{"claim": claim, "why": "w", "falsify": "f"}]))
-    path.write_text(json.dumps({"thinker": thinker, "tooler": [], "coder": []}), encoding="utf-8")
+    pack = dummy_pack(obs, extra_config={"steps": 12})
+    pack["hypothesis"] = "ensemble pack twelve steps"
+    thinker = [
+        {
+            "thought": "",
+            "hypotheses": [],
+            "need": {"kind": "tool", "request": "list episodes"},
+            "pack": None,
+            "done": False,
+        },
+        {
+            "thought": "",
+            "hypotheses": [{"claim": "twelve steps", "why": "w", "falsify": "f"}],
+            "need": None,
+            "pack": pack,
+            "done": False,
+        },
+    ]
+    tooler = [{"tool": "list_episodes", "args": {"n": 1}}]
+    path.write_text(
+        json.dumps({"thinker": thinker, "tooler": tooler, "coder": []}),
+        encoding="utf-8",
+    )
     return path
 
 
-def test_cli_ensemble_with_scripted_roles_runs_two_trials(tmp_path: Path, capsys) -> None:
+def test_cli_ensemble_with_scripted_roles_runs_a_trial(tmp_path: Path, capsys) -> None:
     roles_path = _scripted_roles(tmp_path / "roles-script.json")
     run_dir = tmp_path / "ens"
     code = main(
@@ -53,7 +65,7 @@ def test_cli_ensemble_with_scripted_roles_runs_two_trials(tmp_path: Path, capsys
             "--cycles",
             "1",
             "--ensembles",
-            "2",
+            "1",
             "--scripted-roles",
             str(roles_path),
             "--run-dir",
@@ -66,23 +78,23 @@ def test_cli_ensemble_with_scripted_roles_runs_two_trials(tmp_path: Path, capsys
     assert "fallback pack authored by harness" not in out
 
     episodes = [json.loads(l) for l in (run_dir / "episodes" / "index.jsonl").read_text().splitlines()]
-    assert len(episodes) == 2
-    assert len({e["hypothesis_id"] for e in episodes}) == 2
-    assert [e["trial"] for e in episodes] == [1, 2]
+    assert len(episodes) == 1
+    assert episodes[0]["hypothesis_id"]
+    assert episodes[0]["trial"] == 1
 
     roles = json.loads((run_dir / "roles.json").read_text())
     assert roles["roles"]["thinker"]["backend"] == "scripted"
     hyps = list((run_dir / "hypotheses").glob("hyp-*.json"))
-    assert len(hyps) >= 2
+    assert len(hyps) >= 1
     sources = {json.loads(p.read_text())["source"] for p in hyps}
-    assert sources == {"ensemble-1", "ensemble-2"}
+    assert sources == {"ensemble-1"}
 
     names = {json.loads(l)["name"] for l in (run_dir / "trace.jsonl").read_text().splitlines()}
-    assert "ensemble 1" in names and "ensemble 2" in names
+    assert "ensemble 1" in names
     assert "ensemble 1 round 1" in names
     assert "ensemble 1 thinker" in names
     summary = json.loads((run_dir / "ensembles" / "cycle-0001.json").read_text())
-    assert len(summary["candidates"]) == 2 and summary["fallback"] is False
+    assert len(summary["candidates"]) == 1 and summary["fallback"] is False
 
     assert main(["roles", "--run-dir", str(run_dir)]) == 0
     table = capsys.readouterr().out
