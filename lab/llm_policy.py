@@ -79,6 +79,8 @@ class InferPolicy:
         self.tracer = tracer or Tracer(None)
         self.log_path = log_path
         self._last: dict[str, Any] | None = None
+        self._last_retried = False
+        self._last_cut_short = False
         self._parse_fails = 0
         self._hyp_writes: dict[int, int] = {}
         self._reads: dict[int, int] = {}
@@ -111,10 +113,11 @@ class InferPolicy:
                 name, args = self._fallback(obs)
                 print(f"[policy] parse_fallback {name}", flush=True)
                 return name, args
-            return "write_note", {
-                "kind": "parse_error",
-                "text": "last output was not JSON; next turn emit only {\"tool\":...,\"args\":...}",
-            }
+            if self._last_cut_short:
+                text = "last reply ran past the token budget twice; next turn keep the reply short"
+            else:
+                text = "last output was not JSON; next turn emit only {\"tool\":...,\"args\":...}"
+            return "write_note", {"kind": "parse_error", "text": text}
         self._parse_fails = 0
         name, args = parsed
         phase = Phase(obs["phase"])
@@ -183,21 +186,36 @@ class InferPolicy:
         if self.structured:
             extra["json_schema"] = tool_call_schema(tools, obs)
         with self.tracer.span(label, kind=LLM, inputs=prompt, metadata=meta) as span:
-            raw = self.engine.generate(
-                prompt,
-                max_new_tokens=self.max_new_tokens,
-                enable_thinking=False,
-                **extra,
-            )
-            parsed = parse_tool_call(raw)
+            raw = self._decode(prompt, self.max_new_tokens, extra)
+            retried = cut_short = self._cut_short()
+            if cut_short:
+                # The budget wrote the tail of this reply, so its last values are
+                # not the model's (lr 0, steps 3). Ask once more with twice the room.
+                raw = self._decode(prompt, 2 * self.max_new_tokens, extra)
+                cut_short = self._cut_short()
+            parsed = None if cut_short else parse_tool_call(raw)
             span.set(
                 outputs=raw,
                 parsed_tool=parsed[0] if parsed else None,
                 prompt_chars=len(prompt),
                 completion_chars=len(raw),
+                retried=retried,
+                cut_short=cut_short,
             )
         self._log(prompt, raw)
+        self._last_retried, self._last_cut_short = retried, cut_short
+        if cut_short:
+            print(f"[policy] {label} cut short again at {2 * self.max_new_tokens} tokens; turn failed", flush=True)
+            return ""
         return raw
+
+    def _decode(self, prompt: str, max_new_tokens: int, extra: dict[str, Any]) -> str:
+        return self.engine.generate(prompt, max_new_tokens=max_new_tokens, enable_thinking=False, **extra)
+
+    def _cut_short(self) -> bool:
+        """Whether infer had to write the end of the last schema reply to fit the budget."""
+        stats = getattr(self.engine, "last_json_stats", None) if self.structured else None
+        return isinstance(stats, dict) and bool(stats.get("forced"))
 
     def _nudge(
         self, obs: dict[str, Any], instruction: str, *, want: str

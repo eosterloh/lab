@@ -120,6 +120,7 @@ def main() -> int:
                         "case": name,
                         "seconds": round(seconds, 2),
                         "tokens": len(tokenizer.encode(raw, add_special_tokens=False)),
+                        "retried": policy._last_retried,
                         **score(raw, obs, on_script),
                         "raw": raw,
                     }
@@ -131,8 +132,8 @@ def main() -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
-    print("\n| model | mode | parsed | bare JSON | legal tool | on script | valid pack | s/turn |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("\n| model | mode | parsed | bare JSON | legal tool | on script | valid pack | retried | s/turn |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for model in dict.fromkeys(r["model"] for r in rows):
         for structured in (False, True):
             group = [r for r in rows if r["model"] == model and r["structured"] is structured]
@@ -144,7 +145,7 @@ def main() -> int:
 
             print(
                 f"| {model} | {'schema' if structured else 'plain'} | {frac('parsed')} | {frac('bare_json')} "
-                f"| {frac('legal')} | {frac('on_script')} | {valid}/{len(packs)} "
+                f"| {frac('legal')} | {frac('on_script')} | {valid}/{len(packs)} | {frac('retried')} "
                 f"| {sum(r['seconds'] for r in group) / len(group):.1f} |"
             )
     return 0
