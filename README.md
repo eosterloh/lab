@@ -84,6 +84,7 @@ Tests: `pytest`
 | `LAB_ALLOW_NETWORK` | `0` disables fetch/search **and** Hub downloads on cache miss |
 | `LAB_DATA_CACHE` | allowlisted HF text cache (default `~/data/lab`) |
 | `LAB_POLICY_MODEL` | experimenter checkpoint (default `~/models/Qwen3.8-27B`) |
+| `LAB_STRUCTURED` | `0` stops passing tool-call schemas to the infer engine (default on) |
 | `LANGSMITH_TRACING` | `true` mirrors spans to LangSmith (needs `pip install -e ".[trace]"`) |
 | `LANGSMITH_API_KEY` | LangSmith key; without it only the local `trace.jsonl` is written |
 | `LANGSMITH_PROJECT` | LangSmith project name (default `lab-harness`) |
@@ -117,6 +118,8 @@ filter to one phase or one tool across a whole run.
 - Train: `job_status`, `cancel_job`, `enter_eval`
 
 Pack fields: hypothesis, trainer (`dummy` \| `lab` \| `tinytrain`), config, data_manifest, eval_suite_id (`core`), eval_suite_version (`1`), parent_checkpoint, budgets (`max_hours` ≤ 3.5).
+
+Structured replies: when the engine supports `json_schema` (infer with `generate_json`), every experimenter turn is decoded under `lab/schemas.py`. The reply is one `{"tool", "args"}` object for a tool in the current phase, with that tool's argument shape. A nudge allows only the tool it asks for. A `write_pack` can only name `trainer: "lab"`, the seven lab config keys, the parent checkpoint the harness expects (`last_checkpoint`, else the subject), and train sources that are the default mix or already cached. The model still chooses the tool and every value. `python scripts/structured_ab.py --model DIR` runs the same turns with and without the schema and scores both with the harness's own parser.
 
 Lab config keys: `lr`, `steps`, `hidden`, `layers`, `heads`, `seq_len`, `batch`. Default train mix is the allowlisted TinyStories slice, materialized into `jobs/.../data.txt` before the trainer starts. `prefetch_data` fills `LAB_DATA_CACHE`; the GPU job stays offline. Frozen eval is never a train source. Cycle N+1 copies `checkpoints/latest.pt` in as `parent.pt` so weights continue. Frozen confirm PPL is measured on the `.pt` (not trainer val). The experimenter (`--policy qwen` / `--policy nano`) defaults to Qwen3.8-27B.
 
