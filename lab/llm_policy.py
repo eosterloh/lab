@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 import json
 import sys
 
 from lab.data_cache import ALLOWLIST, DEFAULT_MIX
 from lab.parse import parse_tool_call
 from lab.policy import lab_pack
+from lab.schemas import structured_enabled, tool_call_schema
 from lab.tracing import LLM, Tracer
 from lab.types import MEMORY_TOOLS, PHASE_TOOLS, Phase
 
@@ -64,8 +65,12 @@ class InferPolicy:
         max_error_streak: int = 3,
         max_reads_per_cycle: int = 4,
         tracer: Tracer | None = None,
+        structured: bool | None = None,
     ) -> None:
         self.engine = engine
+        # Only infer engines that know json_schema (they ship generate_json) get one.
+        wanted = structured_enabled() if structured is None else structured
+        self.structured = wanted and hasattr(engine, "generate_json")
         self.max_new_tokens = max_new_tokens
         self.parse_retries = parse_retries
         self.max_hyp_writes_per_cycle = max_hyp_writes_per_cycle
@@ -97,7 +102,7 @@ class InferPolicy:
                 )
             return want, want_args
         prompt = self._prompt(obs)
-        raw = self._generate(prompt, "policy.act", obs)
+        raw = self._generate(prompt, "policy.act", obs, PHASE_TOOLS[Phase(obs["phase"])])
         parsed = parse_tool_call(raw)
         if parsed is None:
             self._parse_fails += 1
@@ -161,14 +166,28 @@ class InferPolicy:
         )
 
     def _generate(
-        self, prompt: str, label: str, obs: dict[str, Any], **meta: Any
+        self,
+        prompt: str,
+        label: str,
+        obs: dict[str, Any],
+        tools: Iterable[str],
+        **meta: Any,
     ) -> str:
-        meta = {"cycle": obs.get("cycle"), "phase": obs.get("phase"), **meta}
+        meta = {
+            "cycle": obs.get("cycle"),
+            "phase": obs.get("phase"),
+            "structured": self.structured,
+            **meta,
+        }
+        extra: dict[str, Any] = {}
+        if self.structured:
+            extra["json_schema"] = tool_call_schema(tools, obs)
         with self.tracer.span(label, kind=LLM, inputs=prompt, metadata=meta) as span:
             raw = self.engine.generate(
                 prompt,
                 max_new_tokens=self.max_new_tokens,
                 enable_thinking=False,
+                **extra,
             )
             parsed = parse_tool_call(raw)
             span.set(
@@ -189,7 +208,7 @@ class InferPolicy:
         design, so the fallback is only a last resort.
         """
         prompt = f"{self._prompt(obs)}IMPORTANT: {instruction}\n"
-        raw = self._generate(prompt, "policy.nudge", obs, want=want)
+        raw = self._generate(prompt, "policy.nudge", obs, [want], want=want)
         parsed = parse_tool_call(raw)
         if parsed is not None and parsed[0] == want:
             print(f"[policy] nudge produced {want}", flush=True)
