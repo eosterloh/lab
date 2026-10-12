@@ -56,6 +56,20 @@ class SchemaEngine(RecordingEngine):
         raise AssertionError("InferPolicy parses the text itself")
 
 
+class BudgetEngine(SchemaEngine):
+    """Reports, like infer's last_json_stats, that the budget wrote the end of some replies."""
+
+    def __init__(self, replies: list[str], forced: list[int]) -> None:
+        super().__init__(replies)
+        self.forced = list(forced)
+        self.last_json_stats: dict[str, int] | None = None
+
+    def generate(self, prompt: str, **kwargs: Any) -> str:
+        raw = super().generate(prompt, **kwargs)
+        self.last_json_stats = {"tokens": 40, "forced": self.forced.pop(0) if self.forced else 0}
+        return raw
+
+
 def _tools(schema: dict[str, Any]) -> list[str]:
     return sorted(b["properties"]["tool"]["const"] for b in schema.get("anyOf", [schema]))
 
@@ -87,6 +101,25 @@ def test_engines_without_json_schema_get_the_plain_call(monkeypatch: pytest.Monk
     off = SchemaEngine(['{"tool": "run_eval", "args": {}}'])
     InferPolicy(off).act(sup.observe())
     assert "json_schema" not in off.calls[0]
+
+
+def test_a_reply_cut_short_by_the_budget_is_asked_again_with_twice_the_room(sup: Supervisor) -> None:
+    engine = BudgetEngine(['{"tool": "halt", "args": {}}', '{"tool": "run_eval", "args": {}}'], forced=[3, 0])
+    policy = InferPolicy(engine, max_new_tokens=64)
+    assert policy.act(sup.observe())[0] == "run_eval"
+    assert [call["max_new_tokens"] for call in engine.calls] == [64, 128]
+    assert policy._last_retried and not policy._last_cut_short
+
+
+def test_a_reply_cut_short_twice_is_a_failed_turn(sup: Supervisor) -> None:
+    run_eval = '{"tool": "run_eval", "args": {}}'
+    policy = InferPolicy(BudgetEngine([run_eval, run_eval], forced=[3, 2]), max_new_tokens=64)
+    name, args = policy.act(sup.observe())
+    assert name == "write_note" and "token budget" in args["text"]
+
+    claim = '{"tool": "write_hypothesis", "args": {"claim": "a", "why": "b", "falsify": "c"}}'
+    nudged = InferPolicy(BudgetEngine([claim, claim], forced=[3, 2]))
+    assert nudged._nudge(OBS, "Write the claim.", want="write_hypothesis") == nudged._fallback(OBS)
 
 
 def test_pack_schema_pins_what_the_harness_decides() -> None:
@@ -141,7 +174,11 @@ def test_harness_fallbacks_fit_the_schema(sup: Supervisor) -> None:
 
 
 def test_a_random_model_still_writes_a_legal_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A random-weight model knows nothing about JSON: whatever parses is the schema's doing."""
+    """A random-weight model knows nothing about JSON: whatever parses is the schema's doing.
+
+    It never ends a string on its own either, so the budget closes every pack it
+    writes, and the policy falls back rather than train on it.
+    """
     _infer_module("torch")
     synth = _infer_module("engine.synth")
     from engine.agent_api import load_engine
@@ -172,12 +209,20 @@ def test_a_random_model_still_writes_a_legal_pack(tmp_path: Path, monkeypatch: p
     engine = load_engine(folder, device="cpu", dtype="float32")
 
     policy = InferPolicy(engine, max_new_tokens=512)
-    name, args = policy._nudge(OBS, "Call write_pack now.", want="write_pack")
+    raw = engine.generate(
+        f"{policy._prompt(OBS)}IMPORTANT: Call write_pack now.\n",
+        max_new_tokens=512,
+        enable_thinking=False,
+        json_schema=tool_call_schema(["write_pack"], OBS),
+    )
+    assert engine.last_json_stats["forced"] > 0
+    name, args = parse_tool_call(raw)
     assert name == "write_pack"
     pack = args["pack"]
     assert pack["parent_checkpoint"] == OBS["last_checkpoint"]
     assert pack["trainer"] == "lab"
     assert set(pack["data_manifest"]["sources"]) <= set(train_sources(OBS))
+    assert policy._nudge(OBS, "Call write_pack now.", want="write_pack") == policy._fallback(OBS)
 
     train = {**OBS, "phase": "train"}
     raw_turn = engine.generate(
