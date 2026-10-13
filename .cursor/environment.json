@@ -1,0 +1,5 @@
+{
+  "name": "lab — Eval → Research → Train harness",
+  "user": "ubuntu",
+  "install": "bash scripts/cloud-agent-install.sh"
+}
