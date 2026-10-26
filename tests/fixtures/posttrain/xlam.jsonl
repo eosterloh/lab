@@ -1,0 +1,6 @@
+{"query": "Read the sandbox file notes.txt", "tools": "[{\"name\": \"read_file\", \"description\": \"read a sandbox file\", \"parameters\": {\"path\": {\"type\": \"string\"}}}]", "answers": "[{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}]"}
+{"query": "What is the weather in Paris?", "tools": "[{\"name\": \"get_weather\"}]", "answers": "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]"}
+{"query": "Read notes and also list files", "answers": "[{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}, {\"name\": \"list_files\", \"arguments\": {}}]"}
+{"query": "Stop the run", "answers": "[{\"name\": \"halt\", \"arguments\": {\"reason\": \"stop\"}}]"}
+{"query": "Read a path that escapes the sandbox", "answers": "[{\"name\": \"read_file\", \"arguments\": {\"filepath\": \"../secrets.txt\"}}]"}
+{"query": "Search the web for TinyStories", "answers": [{"name": "web_search", "arguments": {"q": "TinyStories"}}]}

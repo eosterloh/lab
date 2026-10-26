@@ -1,0 +1,4 @@
+{"system": "SYSTEM: You are a helpful assistant with access to the following functions. Use them if required - {\"name\": \"read_file\", \"parameters\": {\"path\": {\"type\": \"string\"}}}", "chat": "USER: Read the sandbox file notes.txt <|endoftext|> ASSISTANT: <functioncall> {\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}} <|endoftext|>"}
+{"system": "SYSTEM: functions get_news", "chat": "USER: What is the latest news? <|endoftext|> ASSISTANT: I can't do that. <|endoftext|>"}
+{"system": "SYSTEM: functions", "chat": "USER: Search TinyStories <|endoftext|> ASSISTANT: {\"name\": \"web_search\", \"arguments\": \"{\\\"query\\\": \\\"TinyStories\\\"}\"} <|endoftext|>"}
+{"system": "SYSTEM: functions", "chat": "USER: Make me a password <|endoftext|> ASSISTANT: <functioncall> {\"name\": \"generate_password\", \"arguments\": {\"length\": 12}} <|endoftext|>"}
