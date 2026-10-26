@@ -1,0 +1,4 @@
+{"id": "one", "conversations": [{"from": "system", "value": "You are a function calling AI model."}, {"from": "human", "value": "Search the web for TinyStories."}, {"from": "gpt", "value": "<tool_call>\n{\"name\": \"web_search\", \"arguments\": {\"query\": \"TinyStories\"}}\n</tool_call>"}]}
+{"id": "two", "conversations": [{"from": "human", "value": "Read the notes and list files."}, {"from": "gpt", "value": "<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"list_files\", \"arguments\": {}}\n</tool_call>"}]}
+{"id": "json-mode", "conversations": [{"from": "human", "value": "Reply with a json object."}, {"from": "gpt", "value": "{\"ok\": true}"}]}
+{"id": "skill", "conversations": [{"from": "human", "value": "Read the lab harness skill."}, {"from": "gpt", "value": "<tool_call>\n{\"name\": \"read_skill\", \"arguments\": {\"skill\": \"lab_harness\"}}\n</tool_call>"}]}
