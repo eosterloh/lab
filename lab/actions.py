@@ -55,6 +55,9 @@ def read_metrics(sup: Any, args: Args) -> ToolResult:
 
 
 def read_samples(sup: Any, args: Args) -> ToolResult:
+    # Eval does not record samples, so this is not in PHASE_TOOLS and the role
+    # prompts do not offer it. The handler stays for a scorer that later fills
+    # last_eval["samples"].
     samples = (sup.state.last_eval or {}).get("samples")
     return ok(samples=samples or [])
 
@@ -212,14 +215,27 @@ def write_pack(sup: Any, args: Args) -> ToolResult:
     args = dict(args)
     # hypothesis_id links the pack to a board entry; the pack schema itself
     # rejects unknown fields, so strip it wherever the model put it.
+    # hypothesis_ids links every claim an ensemble stated for this one pack.
     hypothesis_id = args.pop("hypothesis_id", None)
+    hypothesis_ids = args.pop("hypothesis_ids", None)
     payload = args.get("pack") or args
-    if isinstance(payload, dict) and "hypothesis_id" in payload:
+    if isinstance(payload, dict) and ("hypothesis_id" in payload or "hypothesis_ids" in payload):
         payload = dict(payload)
-        hypothesis_id = hypothesis_id or payload.pop("hypothesis_id")
+        if payload.get("hypothesis_id"):
+            hypothesis_id = hypothesis_id or payload.pop("hypothesis_id")
+        else:
+            payload.pop("hypothesis_id", None)
+        if payload.get("hypothesis_ids"):
+            hypothesis_ids = hypothesis_ids or payload.pop("hypothesis_ids")
+        else:
+            payload.pop("hypothesis_ids", None)
     try:
         pack = ArtifactPack.from_dict(payload if "hypothesis" in payload else args)
-        digest = sup.save_pack(pack, hypothesis_id=str(hypothesis_id) if hypothesis_id else None)
+        digest = sup.save_pack(
+            pack,
+            hypothesis_id=str(hypothesis_id) if hypothesis_id else None,
+            hypothesis_ids=list(hypothesis_ids) if isinstance(hypothesis_ids, list) else None,
+        )
         return ok(pack_hash=digest, pack=pack.canonical(), hypothesis_id=sup.state.hypothesis_id)
     except Exception as e:
         return err(str(e))

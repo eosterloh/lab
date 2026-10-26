@@ -78,22 +78,13 @@ def test_interleave_runs_dummy_then_scripted_on_even_cycles(sup) -> None:
     assert len(sup.episodes.summaries()) == 2
 
 
-def test_promote_uses_confirmation_metric_and_rejects_tiny_deltas(sup) -> None:
-    """First seal can become champion; a huge min_delta must not re-promote."""
+def test_promote_refuses_a_trainer_val_proxy(sup) -> None:
+    """Dummy confirm_ppl is a trainer proxy. It must not become champion."""
     sup.run_policy(DummyPolicy(), max_cycles=1, max_steps=50)
-    first = promote(sup.cfg.run_dir)
-    assert first["promoted"] is True
-    second = promote(sup.cfg.run_dir, min_delta=10.0)
-    assert second["promoted"] is False
-
-
-def test_promote_refuses_an_unchanged_score(sup) -> None:
-    """A tie is not a win — the same checkpoint must not promote twice."""
-    sup.run_policy(DummyPolicy(), max_cycles=1, max_steps=50)
-    assert promote(sup.cfg.run_dir)["promoted"] is True
-    again = promote(sup.cfg.run_dir)
-    assert again["promoted"] is False
-    assert again["reason"] == "confirm_score did not beat champion"
+    result = promote(sup.cfg.run_dir)
+    assert result["promoted"] is False
+    assert "trainer_val_proxy" in result["reason"]
+    assert not (sup.cfg.run_dir / "champion.json").exists()
 
 
 def test_cli_dummy_two_cycles_writes_run_dir(tmp_path: Path, monkeypatch) -> None:

@@ -5,12 +5,18 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from lab.config import LabConfig
 from lab.ensemble.policy import EnsemblePolicy
 from lab.ensemble.registry import RoleRegistry
-from lab.ensemble.roles import ROLES, Roles, env_var_for
+from lab.ensemble.roles import (
+    DEFAULT_INFER_ROOT,
+    ROLES,
+    InferBackend,
+    Roles,
+    env_var_for,
+)
 from lab.llm_policy import DEFAULT_POLICY_MODEL, InferPolicy, load_infer_engine
 from lab.policy import DummyPolicy, InterleavePolicy, LabPolicy, ScriptedPolicy
 from lab.promote import promote
@@ -47,6 +53,39 @@ def _load_scripted_roles(path: Path) -> Roles:
     return Roles.scripted(scripts["thinker"], scripts["tooler"], scripts["coder"])
 
 
+def _ensemble_roles(cfg: Any, scripted_roles: Path | None) -> Roles:
+    """Roles for this run: scripted file, else env, else what roles.json recorded.
+
+    ``roles.json`` is read back so a re-run without the env vars keeps the
+    models from last time. An env var or ``--scripted-roles`` wins, and the
+    registry is updated to match so the file does not go stale.
+    """
+    if scripted_roles:
+        roles = _load_scripted_roles(scripted_roles)
+        RoleRegistry(cfg.roles_path, initial={role: roles.spec(role) for role in ROLES})
+        return roles
+    env_roles = Roles.from_env(cfg)
+    saved = RoleRegistry(cfg.roles_path).specs() if cfg.roles_path.is_file() else None
+    infer_root = cfg.infer_root or DEFAULT_INFER_ROOT
+    backends: dict[str, Any] = {}
+    specs: dict[str, Any] = {}
+    for role in ROLES:
+        env_spec = env_roles.spec(role)
+        if env_spec.backend == "infer":
+            specs[role] = env_spec
+            backends[role] = env_roles.backend(role)
+            continue
+        prior = saved.get(role) if saved else None
+        if prior is not None and prior.backend == "infer" and prior.model_dir:
+            specs[role] = prior
+            backends[role] = InferBackend(prior.model_dir, infer_root)
+            continue
+        specs[role] = env_spec
+        backends[role] = env_roles.backend(role)
+    reg = RoleRegistry(cfg.roles_path, initial=specs)
+    return Roles(backends, reg.specs())
+
+
 def _build_ensemble_policy(
     sup: Supervisor,
     *,
@@ -55,9 +94,7 @@ def _build_ensemble_policy(
     scripted_roles: Path | None,
 ) -> EnsemblePolicy:
     cfg = sup.cfg
-    roles = _load_scripted_roles(scripted_roles) if scripted_roles else Roles.from_env(cfg)
-    specs = {role: roles.spec(role) for role in ROLES}
-    RoleRegistry(cfg.roles_path, initial=specs)
+    roles = _ensemble_roles(cfg, scripted_roles)
     desc = roles.describe()
     print(
         "roles: "

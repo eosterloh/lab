@@ -24,6 +24,12 @@ from lab.data_cache import list_cache
 
 FINISHED = {"succeeded", "failed", "cancelled"}
 
+# enter_train refused because another job holds the GPU. run_policy sleeps
+# through these instead of counting them toward the consecutive-error halt.
+GPU_LOCK_BACKOFF_S = (1, 2, 4, 8, 16, 30, 30, 30)
+
+_OBS_CONFIG_KEYS = ("lr", "steps", "hidden", "layers", "heads", "seq_len", "batch")
+
 # Tools whose phase gate lives here rather than in PHASE_TOOLS (that table is
 # shared with other workstreams; see dispatch()).
 RESEARCH_ONLY_EXTRA = frozenset({"queue_candidates"})
@@ -114,7 +120,7 @@ class Supervisor:
             "last_metrics": self.state.last_metrics,
             "subject_checkpoint": self.cfg.subject_checkpoint,
             "last_checkpoint": self._last_checkpoint(),
-            "episodes": self.episodes.summaries(n=8),
+            "episodes": self._episodes_for_prompt(n=8),
             "hypothesis": self.current_hypothesis.summary(),
             "hypotheses": self.board.summary(cycle=self.state.cycle),
             "trial": self.state.trial,
@@ -140,8 +146,39 @@ class Supervisor:
                 return str(raw)
         return None
 
-    def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
-        result = self.dispatch(name, args or {})
+    def _episodes_for_prompt(self, n: int = 8) -> list[dict[str, Any]]:
+        """Index rows plus the config and eval fields the prompts already read.
+
+        ``summaries()`` is the index (id, title, confirm_ppl). The digest looks
+        up ``config.lr`` / ``config.steps`` and ``eval.confirm_ppl`` on each
+        row; without this those stay blank and a model cannot avoid a repeat.
+        """
+        rows: list[dict[str, Any]] = []
+        for row in self.episodes.summaries(n=n):
+            item = dict(row)
+            try:
+                full = self.episodes.load(str(item.get("id") or ""))
+            except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, TypeError):
+                rows.append(item)
+                continue
+            cfg = full.get("config") if isinstance(full.get("config"), dict) else {}
+            item["config"] = {k: cfg[k] for k in _OBS_CONFIG_KEYS if k in cfg}
+            ev = full.get("eval") if isinstance(full.get("eval"), dict) else {}
+            item["eval"] = {
+                "confirm_ppl": ev.get("confirm_ppl", item.get("confirm_ppl")),
+                "confirm_source": ev.get("confirm_source", item.get("confirm_source")),
+            }
+            rows.append(item)
+        return rows
+
+    def call(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        budgeted: bool = True,
+    ) -> dict[str, Any]:
+        result = self.dispatch(name, args or {}, budgeted=budgeted)
         self._log_tool(name, result)
         self.save()
         return result.to_dict()
@@ -165,7 +202,7 @@ class Supervisor:
             where += f".t{self.state.trial}"
         print(f"[tool] {self.state.phase} {where} {name} {flag}", flush=True)
 
-    def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
+    def dispatch(self, name: str, args: dict[str, Any], *, budgeted: bool = True) -> ToolResult:
         if self.state.halted and name not in {
             "read_notebook",
             "list_episodes",
@@ -181,10 +218,15 @@ class Supervisor:
             # PHASE_TOOLS so this workstream does not edit the shared table.
             allowed = allowed | RESEARCH_ONLY_EXTRA
         if name not in allowed:
-            return err(f"tool {name!r} is not allowed in phase {phase.value}")
+            listed = ", ".join(sorted(allowed))
+            return err(
+                f"tool {name!r} is not allowed in phase {phase.value}. Allowed tools: {listed}."
+            )
         if name not in actions.REGISTRY:
             return err(f"unknown tool {name!r}")
-        if phase is Phase.RESEARCH and name not in {"enter_train", "halt"}:
+        # Commit/fallback calls pass budgeted=False. They still have to be a
+        # legal research tool; they just must not lose to the shared cap.
+        if budgeted and phase is Phase.RESEARCH and name not in {"enter_train", "halt"}:
             cap = self._research_cap()
             if not cap.ok:
                 return cap
@@ -251,22 +293,46 @@ class Supervisor:
         )
         return hyp
 
-    def save_pack(self, pack: ArtifactPack, hypothesis_id: str | None = None) -> str:
-        if hypothesis_id and not self.board.has(hypothesis_id):
-            raise KeyError(f"unknown hypothesis {hypothesis_id!r}")
+    def save_pack(
+        self,
+        pack: ArtifactPack,
+        hypothesis_id: str | None = None,
+        hypothesis_ids: list[str] | None = None,
+    ) -> str:
+        ids: list[str] = []
+        if isinstance(hypothesis_ids, (list, tuple)):
+            for raw in hypothesis_ids:
+                hid = str(raw or "").strip()
+                if hid and hid not in ids:
+                    ids.append(hid)
+        if hypothesis_id:
+            hid = str(hypothesis_id).strip()
+            if hid and hid not in ids:
+                ids.append(hid)
+        for hid in ids:
+            if not self.board.has(hid):
+                raise KeyError(f"unknown hypothesis {hid!r}")
         digest = self.packs.save(pack)
         self.state.pack_hash = digest
-        hyp_id = hypothesis_id or self.current_hypothesis.id or None
-        if hyp_id:
-            self.board.link_pack(hyp_id, digest)
-            self.state.hypothesis_id = hyp_id
+        if not ids:
+            current = self.current_hypothesis.id or None
+            if current:
+                ids = [current]
+        for hid in ids:
+            self.board.link_pack(hid, digest)
+        if ids:
+            self.state.pack_cohorts[digest] = list(ids)
+        if hypothesis_id:
+            self.state.hypothesis_id = str(hypothesis_id)
+        elif ids:
+            self.state.hypothesis_id = ids[-1]
         self.notebook.append(
             cycle=self.state.cycle,
             phase=self.state.phase,
             kind="pack",
             pack_hash=digest,
             hypothesis=pack.hypothesis,
-            hypothesis_id=hyp_id,
+            hypothesis_id=self.state.hypothesis_id,
             text=f"pack {digest[:12]}",
         )
         return digest
@@ -396,10 +462,24 @@ class Supervisor:
             and confirm is not None
             and (best_before is None or float(confirm) < best_before)
         )
-        if hyp_id:
-            self.board.link_episode(hyp_id, ep["id"], supporting=supporting)
-            if result.get("confirm_source") and result.get("confirm_source") != "trainer_val_proxy":
-                self.board.mark(hyp_id, "holdout_not_proxy", True)
+        # One pack can test every hypothesis the ensemble named when it wrote
+        # the pack. A later claim that merely inherited the hash stays untested.
+        linked: list[str] = []
+        for hid in self.state.pack_cohorts.get(self.state.pack_hash or "", []):
+            if hid not in linked:
+                linked.append(hid)
+        if hyp_id and hyp_id not in linked:
+            linked.append(hyp_id)
+        real_holdout = bool(result.get("confirm_source")) and result.get("confirm_source") != "trainer_val_proxy"
+        for hid in linked:
+            if not self.board.has(hid):
+                continue
+            hyp = self.board.get(hid)
+            if not hyp.is_live() or hyp.episode_id:
+                continue
+            self.board.link_episode(hid, ep["id"], supporting=supporting)
+            if real_holdout:
+                self.board.mark(hid, "holdout_not_proxy", True)
         self.state.trial_results.append(
             {
                 "trial": self.state.trial,
@@ -580,6 +660,7 @@ class Supervisor:
     ) -> dict[str, Any]:
         steps = 0
         err_streak = 0
+        gpu_waits = 0
         run_inputs = {
             "policy": type(policy).__name__,
             "max_cycles": max_cycles,
@@ -619,6 +700,27 @@ class Supervisor:
                 if callable(observe):
                     observe(result)
                 steps += 1
+                # A held GPU lock is transient. Sleep and retry instead of
+                # burning the consecutive-error halt on enter_train.
+                if (
+                    name == "enter_train"
+                    and not result.get("ok")
+                    and "gpu lock" in str(result.get("error") or "")
+                ):
+                    if gpu_waits < len(GPU_LOCK_BACKOFF_S):
+                        delay = GPU_LOCK_BACKOFF_S[gpu_waits]
+                        gpu_waits += 1
+                        err_streak = 0
+                        print(
+                            f"[gpu] lock held, backoff {delay}s "
+                            f"(attempt {gpu_waits}/{len(GPU_LOCK_BACKOFF_S)})",
+                            flush=True,
+                        )
+                        time.sleep(delay)
+                        continue
+                    self.halt(f"enter_train refused: gpu lock held after {gpu_waits} backoff(s)")
+                    break
+                gpu_waits = 0
                 # A policy that ignores rejections would otherwise burn the whole
                 # step budget in one phase, as a wedged read loop once did.
                 err_streak = 0 if result.get("ok") else err_streak + 1

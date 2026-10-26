@@ -82,6 +82,146 @@ def _schema_line(name: str) -> str:
     return f"{line} — {purpose}" if purpose else line
 
 
+def _arg_key(raw: str) -> tuple[str, bool]:
+    if raw.endswith("?"):
+        return raw[:-1], True
+    return raw, False
+
+
+def _json_type(typ: str) -> dict[str, Any]:
+    if typ == "str":
+        return {"type": "string"}
+    if typ == "int":
+        return {"type": "integer"}
+    if typ == "number":
+        return {"type": "number"}
+    if typ == "object":
+        return {"type": "object"}
+    if typ == "list[str]":
+        return {"type": "array", "items": {"type": "string"}}
+    if typ.startswith("list"):
+        return {"type": "array"}
+    return {"type": "string"}
+
+
+def tool_json_schemas() -> dict[str, dict[str, Any]]:
+    """JSON-schema-style parameters for every tool in ``TOOL_SCHEMAS``.
+
+    One object per tool: ``name``, ``description``, and ``parameters``
+    (``type``, ``properties``, ``required``). Optional keys in ``TOOL_SCHEMAS``
+    end in ``?``. Training data and the tooler refusal text both come from here.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name in sorted(TOOL_SCHEMAS):
+        spec = TOOL_SCHEMAS[name]
+        props: dict[str, Any] = {}
+        required: list[str] = []
+        for raw, typ in spec.get("args", {}).items():
+            key, optional = _arg_key(raw)
+            props[key] = _json_type(typ)
+            if not optional:
+                required.append(key)
+        out[name] = {
+            "name": name,
+            "description": spec.get("purpose", ""),
+            "parameters": {
+                "type": "object",
+                "properties": props,
+                "required": required,
+            },
+        }
+    return out
+
+
+def _allowed_args(name: str) -> str:
+    spec = TOOL_SCHEMAS.get(name) or {}
+    parts = [f"{k}: {v}" for k, v in spec.get("args", {}).items()]
+    return ", ".join(parts) if parts else "(none)"
+
+
+def _coerce_arg(value: Any, typ: str) -> tuple[Any, bool]:
+    """Accept the declared type, plus unambiguous numeric strings."""
+    if typ == "str":
+        return value, isinstance(value, str)
+    if typ == "int":
+        if isinstance(value, bool):
+            return value, False
+        if isinstance(value, int):
+            return value, True
+        if isinstance(value, float) and value.is_integer():
+            return int(value), True
+        if isinstance(value, str):
+            try:
+                number = float(value)
+            except ValueError:
+                return value, False
+            if number.is_integer():
+                return int(number), True
+        return value, False
+    if typ == "number":
+        if isinstance(value, bool):
+            return value, False
+        if isinstance(value, (int, float)):
+            return float(value) if isinstance(value, float) else value, True
+        if isinstance(value, str):
+            try:
+                return float(value), True
+            except ValueError:
+                return value, False
+        return value, False
+    if typ == "object":
+        return value, isinstance(value, dict)
+    if typ == "list[str]":
+        ok = isinstance(value, list) and all(isinstance(x, str) for x in value)
+        return value, ok
+    if typ.startswith("list"):
+        return value, isinstance(value, list)
+    return value, True
+
+
+def check_tool_args(name: str, args: dict[str, Any]) -> str | None:
+    """Refuse a call whose args don't match ``TOOL_SCHEMAS``.
+
+    Returns None and may coerce numeric strings in ``args`` when the call is
+    acceptable. The message names the field, the declared type, and the
+    allowed args so the model can correct the next turn.
+    """
+    if name not in TOOL_SCHEMAS:
+        return None
+    if not isinstance(args, dict):
+        return (
+            f"{name}: args must be an object, got {type(args).__name__}. "
+            f"Allowed args: {_allowed_args(name)}."
+        )
+    spec = TOOL_SCHEMAS[name].get("args", {})
+    declared: dict[str, str] = {}
+    required: list[str] = []
+    for raw, typ in spec.items():
+        key, optional = _arg_key(raw)
+        declared[key] = typ
+        if not optional:
+            required.append(key)
+    problems: list[str] = []
+    for key in required:
+        value = args.get(key)
+        missing = key not in args or value is None or (isinstance(value, str) and not value.strip())
+        if missing:
+            problems.append(f"missing required arg {key!r} ({declared[key]})")
+    for key, value in list(args.items()):
+        if key not in declared:
+            continue
+        if key in required and (value is None or (isinstance(value, str) and not str(value).strip())):
+            continue
+        coerced, ok = _coerce_arg(value, declared[key])
+        if not ok:
+            problems.append(f"arg {key!r} must be {declared[key]}, got {type(value).__name__}")
+        else:
+            args[key] = coerced
+    if not problems:
+        return None
+    return f"{name}: " + "; ".join(problems) + f". Allowed args: {_allowed_args(name)}."
+
+
 def tool_catalog(phase: Phase, exclude: Iterable[str] = ()) -> str:
     """One line per allowed tool in ``phase``: ``name {arg: type, ...} — purpose``."""
     skip = set(exclude)
@@ -116,7 +256,12 @@ def obs_digest(obs: dict[str, Any], max_chars: int = 3000) -> str:
             cfg = ep.get("config") or {}
             cfg_txt = ""
             if cfg:
-                cfg_txt = f" lr={cfg.get('lr')} steps={cfg.get('steps')}"
+                bits = [
+                    f"{k}={cfg.get(k)}"
+                    for k in ("lr", "steps", "hidden", "layers", "heads", "seq_len", "batch")
+                    if cfg.get(k) is not None
+                ]
+                cfg_txt = (" " + " ".join(bits)) if bits else ""
             lines.append(
                 f"  - {ep.get('id')} confirm_ppl={ep.get('confirm_ppl')} "
                 f"status={ep.get('job_status')}{cfg_txt} :: {_clip(ep.get('title') or '', 100)}"
@@ -516,6 +661,8 @@ __all__ = [
     "HINT_KNOB",
     "PLACEHOLDER",
     "TOOL_SCHEMAS",
+    "check_tool_args",
+    "tool_json_schemas",
     "VARIANT_HINTS",
     "claim_target",
     "coder_prompt",

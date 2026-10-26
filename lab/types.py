@@ -68,7 +68,6 @@ PHASE_TOOLS: dict[Phase, frozenset[str]] = {
     | {
         "run_eval",
         "read_metrics",
-        "read_samples",
         "enter_research",
     },
     Phase.RESEARCH: ALWAYS_TOOLS

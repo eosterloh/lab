@@ -145,7 +145,7 @@ Dropping in a model is one env var per role; nothing loads until the first `gene
 ## Policy tools
 
 - Always: `read_notebook`, `write_note`, `write_beliefs`, `halt`
-- Eval: `run_eval`, `read_metrics`, `read_samples`, `enter_research`
+- Eval: `run_eval`, `read_metrics`, `enter_research`
 - Research: `list_files`, `read_file`, `write_file`, `exec`, `web_fetch`, `web_search`, `prefetch_data`, `write_hypothesis`, `write_pack`, `queue_candidates`, `enter_train`, plus `run_python`, `write_and_run`, `data_stats`
 - Eval + research (inspect): `list_episodes`, `read_episode`, `read_hypothesis`, `list_hypotheses`, `grep_files`, `list_models`, `inspect_model`, `read_checkpoint_meta`, `read_train_log`, `read_trace`, `list_packs`, `read_pack`, `diff_packs`, `list_jobs`, `read_skill`, `list_skills`, `read_episode_metrics`, `sandbox_usage`
 - Train: `job_status`, `cancel_job`, `enter_eval`

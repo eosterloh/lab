@@ -109,6 +109,32 @@ def test_cli_ensemble_without_models_falls_back_and_still_completes(tmp_path: Pa
     assert all("LAB_THINKER_MODEL" in (r["error"] or "") for r in summary["results"])
 
 
+def test_rerun_reads_roles_json_and_env_overrides_a_stale_file(tmp_path: Path, monkeypatch) -> None:
+    from lab.cli import _ensemble_roles
+    from lab.config import LabConfig
+    from lab.ensemble.registry import RoleRegistry
+    from lab.ensemble.roles import RoleSpec
+
+    monkeypatch.delenv("LAB_THINKER_MODEL", raising=False)
+    cfg = LabConfig.from_env(tmp_path / "run")
+    RoleRegistry(
+        cfg.roles_path,
+        initial={"thinker": RoleSpec(role="thinker", backend="infer", model_dir="/models/thinker-a")},
+    )
+    roles = _ensemble_roles(cfg, None)
+    assert roles.spec("thinker").backend == "infer"
+    assert roles.spec("thinker").model_dir == "/models/thinker-a"
+    assert roles.spec("tooler").backend == "null"
+
+    monkeypatch.setenv("LAB_THINKER_MODEL", "/models/thinker-b")
+    cfg = LabConfig.from_env(tmp_path / "run")
+    roles = _ensemble_roles(cfg, None)
+    assert roles.spec("thinker").model_dir == "/models/thinker-b"
+    saved = RoleRegistry(cfg.roles_path)
+    assert saved.current("thinker").model_dir == "/models/thinker-b"
+    assert saved.current("thinker").version == 2
+
+
 def test_cli_roles_without_registry_reports_missing(tmp_path: Path, capsys) -> None:
     assert main(["roles", "--run-dir", str(tmp_path / "nowhere")]) == 1
     assert "no roles.json" in capsys.readouterr().out

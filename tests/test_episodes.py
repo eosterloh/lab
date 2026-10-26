@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lab.ensemble.prompts import obs_digest
 from lab.policy import DummyPolicy
 from tests.helpers import arm_for_train
 
@@ -38,6 +39,21 @@ def test_record_without_hypothesis_id_omits_the_card_line(sup) -> None:
     assert ep["hypothesis_id"] is None and ep["trial"] is None
     card = (sup.cfg.episodes_dir / f"{ep['id']}.md").read_text(encoding="utf-8")
     assert "- hypothesis:" not in card
+
+
+def test_observation_carries_episode_config_and_eval(sup) -> None:
+    """Index rows omit lr/steps; the prompt digest has to see the real config."""
+    sup.run_policy(DummyPolicy(), max_cycles=1, max_steps=50)
+    obs = sup.observe()
+    ep = obs["episodes"][0]
+    pack = sup.packs.load(ep["pack_hash"])
+    assert ep["config"]["lr"] == pack.config["lr"]
+    assert ep["config"]["steps"] == pack.config["steps"]
+    assert ep["eval"]["confirm_ppl"] == ep["confirm_ppl"]
+    assert ep["eval"]["confirm_source"]
+    digest = obs_digest(obs)
+    assert f"lr={ep['config']['lr']}" in digest
+    assert f"steps={ep['config']['steps']}" in digest
 
 
 def test_resealing_same_job_does_not_duplicate_episode(sup) -> None:

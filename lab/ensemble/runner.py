@@ -89,7 +89,11 @@ class EnsembleRunner:
     def _call(self, tool: str, args: dict[str, Any], obs: dict[str, Any]) -> dict[str, Any]:
         meta = {"cycle": obs.get("cycle"), "phase": "research", "tool": tool}
         with self.tracer.span(f"tool.{tool}", kind=TOOL, inputs=args, metadata=meta) as span:
-            result = self.sup.call(tool, args)
+            # Commit and the harness fallback must not spend the research
+            # budget the ensembles already shared. A cap hit during research
+            # used to refuse write_hypothesis / write_pack / queue_candidates
+            # and halt the cycle with nothing queued.
+            result = self.sup.call(tool, args, budgeted=False)
             span.set(outputs=result, error=None if result.get("ok") else str(result.get("error")))
         return result
 
@@ -134,7 +138,11 @@ class EnsembleRunner:
             if not ids:
                 notes.append({"ensemble": res.index, "error": "no hypothesis could be opened; pack skipped"})
                 continue
-            out = self._call("write_pack", {"pack": res.pack, "hypothesis_id": ids[-1]}, obs)
+            out = self._call(
+                "write_pack",
+                {"pack": res.pack, "hypothesis_id": ids[-1], "hypothesis_ids": ids},
+                obs,
+            )
             if not out.get("ok"):
                 notes.append({"ensemble": res.index, "error": f"write_pack: {out.get('error')}"})
                 continue

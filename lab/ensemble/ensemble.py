@@ -16,6 +16,7 @@ import threading
 import time
 
 from lab.ensemble.prompts import (
+    check_tool_args,
     coder_prompt,
     coerce_config_numbers,
     knob_for_hint,
@@ -34,7 +35,7 @@ from lab.ensemble.protocol import CodeAction, Thought, Turn
 from lab.ensemble.roles import Roles
 from lab.ensemble.skills import skills_for_role
 from lab.pack import ArtifactPack
-from lab.parse import parse_json_object, parse_tool_call
+from lab.parse import explain_tool_parse, parse_json_object, parse_tool_call
 from lab.tracing import CHAIN, LLM, TOOL, Tracer
 from lab.types import PHASE_TOOLS, Phase
 
@@ -314,8 +315,8 @@ class Ensemble:
             skills=self._skills["tooler"],
         )
         raw, ms = self._generate("tooler", prompt, obs, r)
-        parsed = parse_tool_call(raw)
-        if parsed is None:
+        parsed = explain_tool_parse(raw)
+        if isinstance(parsed, str):
             res.nudges += 1
             res.transcript.append(
                 Turn(
@@ -323,7 +324,7 @@ class Ensemble:
                     prompt_chars=len(prompt),
                     raw=raw,
                     parsed_ok=False,
-                    result={"ok": False, "error": "tooler: unparseable; no tool was called"},
+                    result={"ok": False, "error": f"tooler: {parsed}"},
                     ms=ms,
                     round=r,
                 )
@@ -332,6 +333,7 @@ class Ensemble:
         tool, args = parsed
         if tool in FORBIDDEN_TOOLS or tool not in self._allowed:
             res.nudges += 1
+            allowed = ", ".join(sorted(self._allowed))
             res.transcript.append(
                 Turn(
                     role="tooler",
@@ -340,8 +342,28 @@ class Ensemble:
                     parsed_ok=True,
                     result={
                         "ok": False,
-                        "error": f"tool {tool!r} is not available to the ensemble (harness/runner job); pick a read or sandbox tool",
+                        "error": (
+                            f"tool {tool!r} is not available to the tooler "
+                            "(harness/runner only: write_pack, write_hypothesis, queue_candidates, "
+                            f"enter_train, halt). Allowed tools: {allowed}."
+                        ),
                     },
+                    ms=ms,
+                    round=r,
+                    tool=tool,
+                )
+            )
+            return last_call
+        arg_err = check_tool_args(tool, args)
+        if arg_err:
+            res.nudges += 1
+            res.transcript.append(
+                Turn(
+                    role="tooler",
+                    prompt_chars=len(prompt),
+                    raw=raw,
+                    parsed_ok=True,
+                    result={"ok": False, "error": arg_err},
                     ms=ms,
                     round=r,
                     tool=tool,
@@ -395,7 +417,7 @@ class Ensemble:
                     prompt_chars=len(prompt),
                     raw=raw,
                     parsed_ok=False,
-                    result={"ok": False, "error": "coder: unparseable; expected a JSON action or a ```python fence"},
+                    result={"ok": False, "error": CodeAction.refusal(raw)},
                     ms=ms,
                     round=r,
                 )

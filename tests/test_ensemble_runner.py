@@ -113,6 +113,74 @@ def test_identical_packs_are_deduped_to_one_candidate(sup: Supervisor) -> None:
     assert any("duplicate" in n.get("skipped", "") for n in out["notes"])
 
 
+def test_commit_is_not_starved_when_the_shared_budget_is_spent(sup: Supervisor) -> None:
+    """Ensembles share one research cap. Commit and the fallback must still land."""
+    obs = _research(sup)
+    sup.cfg.research_max_tool_calls = 0
+    sup.state.research_started_at = time.time() - 30
+    sup.cfg.research_max_seconds = 1
+    blocked = sup.call("list_files")
+    assert blocked["ok"] is False
+    assert "cap" in blocked["error"]
+
+    roles = Roles.scripted(
+        thinker=lambda prompt: _thought(
+            pack=dummy_pack(obs, extra_config={"steps": 15}),
+            hypotheses=[_hyp("the pack survives a spent budget")],
+        ),
+        tooler=[],
+        coder=[],
+    )
+    runner = EnsembleRunner(roles, sup, n=1, max_rounds=2)
+    out = runner.commit(runner.run_research(obs), obs)
+    assert out["fallback"] is False
+    assert len(out["candidates"]) == 1
+    assert sup.call("enter_train")["ok"]
+
+
+def test_fallback_pack_is_not_starved_by_the_research_cap(sup: Supervisor) -> None:
+    obs = _research(sup)
+    sup.cfg.research_max_tool_calls = 0
+    roles = Roles.scripted(thinker=lambda prompt: _thought(done=True), tooler=[], coder=[])
+    runner = EnsembleRunner(roles, sup, n=2, max_rounds=1)
+    out = runner.commit(runner.run_research(obs), obs)
+    assert out["fallback"] is True
+    assert len(out["candidates"]) == 1
+    assert sup.board.list()[0].source == FALLBACK_SOURCE
+
+
+def test_every_stated_hypothesis_is_linked_and_not_killed_untested(sup: Supervisor) -> None:
+    obs = _research(sup)
+    pack = dummy_pack(obs)
+    roles = Roles.scripted(
+        thinker=lambda prompt: _thought(
+            pack=pack,
+            hypotheses=[
+                _hyp("first claim about steps"),
+                _hyp("second claim about steps"),
+            ],
+        ),
+        tooler=[],
+        coder=[],
+    )
+    runner = EnsembleRunner(roles, sup, n=1, max_rounds=2)
+    out = runner.commit(runner.run_research(obs), obs)
+    assert len(out["candidates"]) == 1
+    digest = out["candidates"][0]["pack_hash"]
+    hyps = sup.board.list()
+    assert len(hyps) == 2
+    assert all(h.pack_hash == digest for h in hyps)
+
+    assert sup.call("enter_train")["ok"]
+    assert sup.call("enter_eval")["ok"]
+    assert sup.call("run_eval")["ok"]
+    assert sup.call("enter_research")["ok"]
+    sealed = sup.board.list()
+    assert {h.status for h in sealed} == {"closed"}
+    assert all(h.note != "untested" and h.episode_id for h in sealed)
+    assert len({h.episode_id for h in sealed}) == 1
+
+
 def test_no_packs_falls_back_to_one_harness_pack(sup: Supervisor, capsys) -> None:
     obs = _research(sup)
     roles = Roles.scripted(thinker=lambda prompt: _thought(done=True), tooler=[], coder=[])
@@ -162,7 +230,7 @@ def test_ensembles_run_in_parallel_and_supervisor_calls_are_serialized(sup: Supe
     inside = {"n": 0, "max": 0}
     guard = threading.Lock()
 
-    def guarded_call(name, args=None):
+    def guarded_call(name, args=None, **kwargs):
         with guard:
             inside["n"] += 1
             inside["max"] = max(inside["max"], inside["n"])
