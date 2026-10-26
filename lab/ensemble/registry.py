@@ -34,6 +34,11 @@ class RoleRegistry:
         self._history: list[dict[str, Any]] = []
         if self.path.exists():
             self._load()
+            # A re-run used to ignore `initial` and leave the file pointing at
+            # whatever was written the first time. Sync the live specs in,
+            # keeping candidates and history.
+            if initial is not None and self._sync(initial):
+                self.save()
         else:
             specs = initial if initial is not None else null_specs()
             for role in ROLES:
@@ -91,6 +96,40 @@ class RoleRegistry:
             s = self._roles[role]
             lines.append(f"| {role} | {s.backend} | {s.model_dir or '-'} | {s.version} |")
         return "\n".join(lines) + "\n"
+
+    def _sync(self, initial: dict[str, RoleSpec]) -> bool:
+        """Update stored specs that differ from ``initial``. True if anything changed."""
+        changed = False
+        for role in ROLES:
+            spec = initial.get(role) or RoleSpec(role=role, backend="null")
+            cur = self._roles.get(role)
+            if cur is None:
+                self._roles[role] = spec
+                changed = True
+                continue
+            if cur.backend == spec.backend and (cur.model_dir or None) == (spec.model_dir or None):
+                continue
+            new = RoleSpec(
+                role=role,
+                backend=spec.backend,
+                model_dir=spec.model_dir,
+                max_new_tokens=spec.max_new_tokens or cur.max_new_tokens,
+                version=cur.version + 1,
+                note=spec.note or cur.note,
+            )
+            self._history.append(
+                {
+                    "ts": time.time(),
+                    "role": role,
+                    "from_version": cur.version,
+                    "to_version": new.version,
+                    "model_dir": new.model_dir,
+                    "note": "updated from run config",
+                }
+            )
+            self._roles[role] = new
+            changed = True
+        return changed
 
     # -------------------------------------------------------------- writes
 

@@ -287,6 +287,28 @@ def test_registry_initial_specs_and_roles_from_specs(tmp_path: Path) -> None:
 # ------------------------------------------------------------------- config
 
 
+def test_registry_resyncs_stale_roles_and_keeps_history(tmp_path: Path) -> None:
+    path = tmp_path / "roles.json"
+    reg = RoleRegistry(
+        path,
+        initial={"thinker": RoleSpec(role="thinker", backend="infer", model_dir="/models/old")},
+    )
+    cid = reg.propose("coder", "/models/coder-x", note="keep me")
+    fresh = {
+        "thinker": RoleSpec(role="thinker", backend="infer", model_dir="/models/new"),
+        "tooler": RoleSpec(role="tooler", backend="null"),
+        "coder": RoleSpec(role="coder", backend="null"),
+    }
+    again = RoleRegistry(path, initial=fresh)
+    assert again.current("thinker").model_dir == "/models/new"
+    assert again.current("thinker").version == 2
+    assert again.candidates()[0]["id"] == cid
+    assert any(h["role"] == "thinker" and h["to_version"] == 2 for h in again.to_dict()["history"])
+    # A matching re-run does not bump the version again.
+    third = RoleRegistry(path, initial=fresh)
+    assert third.current("thinker").version == 2
+
+
 def test_config_defaults(tmp_path: Path) -> None:
     cfg = LabConfig.from_env(tmp_path)
     assert cfg.thinker_model is None

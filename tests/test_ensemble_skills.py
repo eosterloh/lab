@@ -126,6 +126,16 @@ def test_pytorch_skill_mentions_checkpoint_and_metrics_keys() -> None:
     assert "clip_grad_norm_" in text
 
 
+def test_skill_cards_state_the_ensemble_research_budget() -> None:
+    for name in ("lab_harness", "sandbox_rules"):
+        text = load_skill(name)
+        assert "N*24+8" in text
+        assert "3600" in text
+        # The single-model default may be named, but not as the cap itself.
+        assert "research_max_tool_calls=50" not in text
+        assert "50 calls" in text and "600" in text
+
+
 def test_lab_harness_lists_phase_tools() -> None:
     from lab.types import PHASE_TOOLS
 

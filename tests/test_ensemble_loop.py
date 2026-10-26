@@ -582,6 +582,58 @@ def test_tool_budget_stops_further_calls(sup: Supervisor) -> None:
     assert res.pack is not None
 
 
+def test_tooler_bad_args_name_the_field_and_do_not_call(sup: Supervisor) -> None:
+    obs = _research(sup)
+    roles = Roles.scripted(
+        thinker=[_thought(need={"kind": "tool", "request": "read a file"}), _thought(done=True)],
+        tooler=['{"tool": "read_file", "args": {}}'],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    err = res.transcript[1].result["error"]
+    assert "path" in err and "Allowed args" in err
+    assert res.tool_calls == 0
+    names = [json.loads(line)["tool"] for line in (sup.cfg.run_dir / "tools.jsonl").read_text().splitlines()]
+    assert "read_file" not in names
+
+
+def test_tooler_accepts_a_hermes_tag_with_a_trailing_comma(sup: Supervisor) -> None:
+    obs = _research(sup)
+    raw = '<tool_call>\n{"tool": "list_files", "args": {"path": ".",},}\n</tool_call>'
+    roles = Roles.scripted(
+        thinker=[_thought(need={"kind": "tool", "request": "list"}), _thought(done=True)],
+        tooler=[raw],
+        coder=[],
+    )
+    res = _ens(sup, roles).run(obs)
+    assert res.transcript[1].result["ok"] is True
+    assert res.transcript[1].tool == "list_files"
+    assert res.tool_calls == 1
+
+
+def test_coder_missing_content_names_the_field(sup: Supervisor) -> None:
+    obs = _research(sup)
+    roles = Roles.scripted(
+        thinker=[_thought(need={"kind": "code", "request": "write"}), _thought(done=True)],
+        tooler=[],
+        coder=['{"path": "ens-1/x.py", "run": true}'],
+    )
+    res = _ens(sup, roles).run(obs)
+    err = res.transcript[1].result["error"]
+    assert "content" in err and "Allowed fields" in err
+    assert res.code_runs == 0
+
+
+def test_read_samples_is_hidden_from_role_prompts() -> None:
+    from lab.ensemble.skills import load_skill
+
+    assert "read_samples" not in tool_catalog(Phase.EVAL)
+    assert "read_samples" not in tool_catalog(Phase.RESEARCH)
+    text = load_skill("lab_harness")
+    assert "read_samples, " not in text
+    assert "read_samples`" not in text.split("eval:")[1].split("\n", 1)[0]
+
+
 def test_unparseable_tooler_counts_as_nudge(sup: Supervisor) -> None:
     obs = _research(sup)
     roles = Roles.scripted(

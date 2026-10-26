@@ -12,7 +12,7 @@ Rules for files and commands in the research sandbox (`lab/sandbox.py`). Break o
 - Disk cap: 50 MB total for the sandbox (`sandbox_max_bytes`). Writes over the cap fail with "sandbox disk cap exceeded". Delete large outputs by overwriting with an empty string.
 - Exec timeout: 30 s wall clock by default (`exec_timeout_s`); `run_python`/`write_and_run` accept `timeout_s`, capped at `LAB_EXEC_MAX_TIMEOUT_S` (300 s). A timeout returns `returncode=-1, timed_out=true`. Longer work belongs in a `lab` train job via `write_pack`.
 - stdout and stderr are each cut at 32,000 chars. Print little; print the summary last.
-- Research phase has a tool-call budget (50 calls, 600 s). Every failed call still counts.
+- Research phase has a tool-call budget. Ensemble runs use at least `N*24+8` calls and 3600 s. The single-experimenter default (50 calls, 600 s) does not apply there. The observation's `research_budget` line is the exact cap. Every failed call still counts.
 
 ## Environment is stripped
 Commands run with `PATH, HOME, LANG, LC_ALL` plus `LAB_TRAIN_DEVICE` and `CUDA_VISIBLE_DEVICES` when the harness has them. Nothing else: no other `LAB_*`, no API keys.

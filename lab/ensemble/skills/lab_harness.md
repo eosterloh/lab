@@ -46,10 +46,10 @@ Cycle: `eval -> research -> train -> eval`. One tool call per turn; illegal tool
 - Always: `read_notebook, write_note, write_beliefs, halt`
 - Memory (eval + research): `list_episodes, read_episode, read_hypothesis, list_hypotheses`
 - Inspect, read-only (eval + research): `grep_files, list_models, inspect_model, read_checkpoint_meta, read_train_log, read_trace, list_packs, read_pack, diff_packs, list_jobs, read_skill, list_skills, read_episode_metrics, sandbox_usage`
-- eval: `run_eval, read_metrics, read_samples, enter_research`
+- eval: `run_eval, read_metrics, enter_research`
 - research: `list_files, read_file, write_file, exec, run_python, write_and_run, data_stats, web_fetch, web_search, write_hypothesis, prefetch_data, write_pack, enter_train`
 - train: `job_status, cancel_job, enter_eval, read_train_log, list_jobs, read_trace`
-Research is budgeted (`research_max_tool_calls=50`, `research_max_seconds=600`). `enter_train` refuses without a valid pack, and while `claim_written` or `pack_ready` is still open.
+Research is budgeted. A single experimenter defaults to 50 calls and 600 s. An ensemble run raises that to at least `N*24+8` calls and 3600 s (`N` is the number of ensembles; the CLI applies `max(default, N*24+8)` and `max(default, 3600)`). The observation line `research_budget` is the exact cap for this run. `enter_train` refuses without a valid pack, and while `claim_written` or `pack_ready` is still open. `read_samples` is not a tool: eval does not record samples.
 
 ## Hypothesis checklist (`lab/hypothesis.py`)
 `write_hypothesis` args: `{"claim", "why", "falsify"}` only. Status: `open -> testing -> killed | closed`. Checklist ids: `claim_written` (train), `pack_ready` (train), `post_eval` (close), `episode_sealed` (close), `holdout_not_proxy` (promote).

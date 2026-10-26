@@ -29,6 +29,10 @@ class RunState:
     # The one under test lives in pack_hash / hypothesis_id, not here.
     candidate_queue: list[dict[str, Any]] = field(default_factory=list)
     hypothesis_id: str | None = None
+    # pack hash -> hypothesis ids explicitly covered by that pack (an ensemble
+    # may state several claims for one pack). Seal links the episode to these,
+    # not to every hypothesis that happens to share the hash.
+    pack_cohorts: dict[str, list[str]] = field(default_factory=dict)
     # Sealed trials of the current cycle:
     # [{"trial", "hypothesis_id", "pack_hash", "job_id", "confirm_ppl", ...}].
     trial_results: list[dict[str, Any]] = field(default_factory=list)

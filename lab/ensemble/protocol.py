@@ -150,6 +150,38 @@ class CodeAction:
             return cls(path=default_path, content=fence.group(1), run=True)
         return None
 
+    @staticmethod
+    def refusal(raw: str) -> str:
+        """Why ``parse`` returned None, naming the field that was wrong."""
+        allowed = "path (str), content (str, required), run (bool), args (list of strings), timeout_s (number)"
+        if not isinstance(raw, str) or not raw.strip():
+            return (
+                "coder reply was empty. "
+                f'Expected {{"path", "content", "run", "args"}} or a ```python fence. Allowed fields: {allowed}.'
+            )
+        data = parse_json_object(raw)
+        if isinstance(data, dict):
+            if "content" not in data:
+                return (
+                    "coder JSON is missing required field 'content' (the python source). "
+                    f"Allowed fields: {allowed}."
+                )
+            if not isinstance(data.get("content"), str):
+                return (
+                    f"coder field 'content' must be a string, got {type(data.get('content')).__name__}. "
+                    f"Allowed fields: {allowed}."
+                )
+            if not data["content"].strip():
+                return "coder field 'content' is empty. Put the python source in 'content'."
+            if "args" in data and data["args"] is not None and not isinstance(data["args"], list):
+                return "coder field 'args' must be a list of strings."
+            if "run" in data and not isinstance(data["run"], (bool, str, int)):
+                return "coder field 'run' must be a bool."
+        return (
+            "coder reply was not a JSON action or a ```python fence. "
+            f'Expected {{"path": "...py", "content": "<source>", "run": true, "args": []}}. Allowed fields: {allowed}.'
+        )
+
 
 @dataclass
 class Turn:
