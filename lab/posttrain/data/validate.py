@@ -5,6 +5,7 @@ from __future__ import annotations
 from lab.posttrain.data.examples import Example
 from lab.posttrain.data.harness import (
     validate_coder_completion,
+    validate_foreign_completion,
     validate_thinker_completion,
     validate_tool_completion,
 )
@@ -12,6 +13,9 @@ from lab.posttrain.data.harness import (
 
 def validate_completion(example: Example, raw: str, *, execute: bool) -> str | None:
     if example.role == "tooler":
+        if example.source == "foreign_tools":
+            tools = example.meta.get("tools")
+            return validate_foreign_completion(raw, tools if isinstance(tools, list) else [])
         return validate_tool_completion(raw)
     if example.role == "thinker":
         return validate_thinker_completion(raw, obs=example.obs, knob=example.knob, claim=example.claim)

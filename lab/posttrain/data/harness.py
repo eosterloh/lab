@@ -138,12 +138,20 @@ def make_obs(
     }
 
 
-def render_tooler(request: str, transcript: list[Turn], *, obs: dict[str, Any], prefix: str) -> str:
+def render_tooler(
+    request: str,
+    transcript: list[Turn],
+    *,
+    obs: dict[str, Any],
+    prefix: str,
+    catalog: str | None = None,
+) -> str:
+    """Render ``tooler_prompt``. ``catalog`` replaces the harness tool list when set."""
     return tooler_prompt(
         request,
         obs,
         transcript,
-        catalog=catalog_text(),
+        catalog=catalog_text() if catalog is None else catalog,
         sandbox_prefix=prefix,
         skills=_SKILLS["tooler"],
     )
@@ -348,6 +356,54 @@ def validate_tool_completion(raw: str) -> str | None:
     return check_tool_args(name, args)
 
 
+def _foreign_type_ok(value: Any, typ: str) -> bool:
+    if typ == "any":
+        return True
+    if typ == "str":
+        return isinstance(value, str)
+    if typ == "int":
+        return _is_int(value)
+    if typ == "number":
+        return _is_number(value)
+    if typ == "bool":
+        return isinstance(value, bool)
+    if typ == "list":
+        return isinstance(value, list)
+    if typ == "object":
+        return isinstance(value, dict)
+    return True
+
+
+def validate_foreign_completion(raw: str, tools: list[dict[str, Any]]) -> str | None:
+    """Arg check against the example's own tool list, not the harness catalog.
+
+    ``tools`` is ``[{"name", "description", "params": [{"name", "type", "required"}]}]``.
+    Required keys and JSON types have to match. Extra keys are left alone.
+    """
+    parsed = parse_tool_call(raw)
+    if parsed is None:
+        return "parse_failed"
+    name, args = parsed
+    if not isinstance(args, dict):
+        return "bad_type"
+    spec = next((tool for tool in tools if tool.get("name") == name), None)
+    if spec is None:
+        return "unknown_tool"
+    for param in spec.get("params") or []:
+        pname = str(param.get("name") or "")
+        if not pname:
+            continue
+        if pname not in args or args[pname] is None:
+            if param.get("required"):
+                return "missing_arg"
+            continue
+        if not _foreign_type_ok(args[pname], str(param.get("type") or "str")):
+            return "bad_type"
+        if param.get("required") and str(param.get("type") or "") == "str" and not str(args[pname]).strip():
+            return "missing_arg"
+    return None
+
+
 def validate_thinker_completion(
     raw: str,
     *,
@@ -514,6 +570,7 @@ __all__ = [
     "skill_names",
     "tool_schemas",
     "validate_coder_completion",
+    "validate_foreign_completion",
     "validate_thinker_completion",
     "validate_tool_completion",
 ]

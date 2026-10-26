@@ -570,24 +570,443 @@ _CODE_NEGATIVES = [
 ]
 
 
-def _attach_negatives(examples: list[Example], negatives: list[str]) -> None:
-    """One wrong completion per single-turn row, cycling the negative list."""
+def _attach_negatives(examples: list[Example], negatives: list[str], *, every: int = 1) -> None:
+    """A wrong completion on every ``every``-th single-turn row.
+
+    Episodes stay SFT-only. ``every`` greater than 1 keeps the DPO file a
+    sample of the native singles instead of a copy of the whole set.
+    """
     singles = [ex for ex in examples if ex.kind == "single"]
     for i, example in enumerate(singles):
+        if every > 1 and i % every != 0:
+            continue
         example.rejected = negatives[i % len(negatives)]
+
+
+# Targets for the native (harness-catalog) split. Public rows are separate
+# and tagged foreign_tools; these are the rows a trainer can upweight.
+_N_TOOLER_SINGLES = 3200
+_N_TOOLER_EPISODES = 180
+_N_THINKER = 420
+
+_PREFIXES = ("ens-1", "ens-2", "ens-3")
+_FILES = (
+    "notes.txt",
+    "log.txt",
+    "metrics.json",
+    "trace.txt",
+    "readme.md",
+    "config.json",
+    "report.txt",
+    "beliefs.md",
+    "train.log",
+    "summary.txt",
+)
+_QUERIES = (
+    "TinyStories learning rate",
+    "confirm_ppl on the parent run",
+    "wikimedia wikipedia dump size",
+    "fineweb-edu sampling rate",
+    "why val_ppl stalled",
+    "best episode config",
+    "lab trainer hidden size",
+    "checkpoint resume rules",
+    "data mix for short stories",
+    "sequence length 32",
+    "batch size and tokens",
+    "open hypotheses this cycle",
+)
+_PATTERNS = ("confirm_ppl", "lr", "hypothesis", "val_ppl", "steps", "hidden", "parent", "episode")
+_URLS = tuple(f"https://example.com/notes/{name}" for name in ("tinystories", "wiki", "fineweb", "runs", "packs", "logs"))
+_NOTES = (
+    "parent run looks undertrained at the current learning rate",
+    "best episode so far is ep-0002",
+    "do not repeat a config already in the episode list",
+    "hidden must stay divisible by heads",
+    "budgets.max_hours stays at or below 0.5",
+    "cite only a confirm_ppl that is already in the observation",
+)
+_SOURCES = (
+    "hf:roneneldan/TinyStories:train:1000",
+    "hf:roneneldan/TinyStories:train:5000",
+    "hf:wikimedia/wikipedia:train:1000",
+    "hf:HuggingFaceFW/fineweb-edu:train:2000",
+)
+_TRACE_KINDS = ("tool", "llm", "chain")
+_STATUSES = ("open", "closed", "tested")
+_MODELS = ("Qwen3-0.6B", "tiny", "subject")
+_PPLS = (11.2, 12.4, 13.8, 15.0, 18.5)
+_LR_TEXT = ("0.0002", "0.0004", "0.0005", "0.0008", "0.0012", "0.0015", "0.002", "0.003")
+_STEPS = (32, 48, 80, 96, 128, 160, 192, 256)
+_BATCH = (4, 16, 32)
+_HIDDEN = (32, 64, 96, 128)
+_MIX_CLAIMS = (
+    "add a wikipedia slice beside TinyStories and expect a lower score than the parent",
+    "mix fineweb-edu into the TinyStories stream and expect a lower score than the parent",
+    "keep TinyStories but shorten the slice and expect a lower score than the parent",
+)
+_MIXES = (
+    ["hf:roneneldan/TinyStories:train:10000", "hf:wikimedia/wikipedia:train:1000"],
+    ["hf:roneneldan/TinyStories:train:10000", "hf:HuggingFaceFW/fineweb-edu:train:2000"],
+    ["hf:roneneldan/TinyStories:train:5000"],
+)
+_EPISODE_CHAINS = (
+    ("list_files", "read_file"),
+    ("list_files", "read_file", "grep_files"),
+    ("web_search", "web_fetch"),
+    ("list_skills", "read_skill"),
+    ("list_episodes", "read_episode"),
+    ("read_notebook", "write_note"),
+    ("list_jobs", "read_train_log"),
+    ("list_packs", "read_pack"),
+    ("sandbox_usage", "list_files", "read_file"),
+    ("list_files", "grep_files", "read_file", "write_note"),
+)
+
+
+def _dedup(rows: list[Example]) -> list[Example]:
+    seen: set[str] = set()
+    out: list[Example] = []
+    for example in rows:
+        digest = example.prompt_hash()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        out.append(example)
+    return out
+
+
+def _variant_value(tool: str, name: str, i: int, prefix: str, path: str) -> Any:
+    skills = skill_names() or ["lab_harness"]
+    if name == "path" and tool == "read_checkpoint_meta":
+        return f"checkpoints/job-{i % 40:04d}.pt"
+    if name == "path":
+        return path
+    if name == "model_dir":
+        return _MODELS[i % len(_MODELS)]
+    if name == "pack_hash":
+        return f"{i + 1:064x}"
+    if name == "a":
+        return f"{i + 1:064x}"
+    if name == "b":
+        return f"{i + 2:064x}"
+    if name == "id" and tool == "read_episode":
+        return f"ep-{i % 40:04d}"
+    if name == "id":
+        return f"hyp-{i % 20:04d}"
+    if name == "source" and tool == "data_stats" and i % 5 == 0:
+        return "builtin:tiny"
+    if name == "source":
+        return _SOURCES[i % len(_SOURCES)]
+    if name == "name":
+        return skills[i % len(skills)]
+    if name == "kind" and tool == "read_trace":
+        return _TRACE_KINDS[i % len(_TRACE_KINDS)]
+    if name == "kind":
+        return ("note", "observation", "result")[i % 3]
+    if name == "query":
+        return _QUERIES[i % len(_QUERIES)]
+    if name == "pattern":
+        return _PATTERNS[i % len(_PATTERNS)]
+    if name == "url":
+        return _URLS[i % len(_URLS)]
+    if name == "text":
+        return _NOTES[i % len(_NOTES)]
+    if name == "content" and tool == "write_and_run":
+        return f"import json\nprint(json.dumps({{'ok': True, 'case': {i % 200}}}))\n"
+    if name == "content":
+        return _NOTES[i % len(_NOTES)]
+    if name == "argv":
+        return ["python3", f"{prefix}/probe_{i % 50}.py"]
+    if name == "args":
+        return ["--steps", str(1 + (i % 9))]
+    if name == "job_id":
+        return f"job-{i % 40:04d}"
+    if name == "split":
+        return "train"
+    if name == "status":
+        return _STATUSES[i % len(_STATUSES)]
+    if name in {"n", "tail", "max_hits", "cycle"}:
+        return 1 + (i % 24)
+    if name == "timeout_s":
+        return 1 + (i % 8)
+    return f"value-{i % 17}"
+
+
+def _variant_args(tool: str, i: int) -> dict[str, Any]:
+    prefix = _PREFIXES[i % len(_PREFIXES)]
+    path = f"{prefix}/{_FILES[i % len(_FILES)]}"
+    include_optional = i % 3 != 0
+    out: dict[str, Any] = {}
+    for name, _typ, required in schema_fields(tool):
+        if not required and not include_optional:
+            continue
+        out[name] = _variant_value(tool, name, i, prefix, path)
+    return out
+
+
+def _variant_request(tool: str, args: dict[str, Any], i: int) -> str:
+    purpose = str((tool_schemas().get(tool) or {}).get("purpose") or tool)
+    if not args:
+        return f"{purpose}. Call it with an empty args object. Lookup {i}."
+    bits = ", ".join(f"{key}={value!r}" for key, value in args.items())
+    return f"{purpose}. One call, nothing else. Use {tool} with {bits}."
+
+
+def _scaled_tooler_singles() -> list[Example]:
+    tools = sorted(allowed_tooler_tools())
+    out: list[Example] = []
+    for i in range(_N_TOOLER_SINGLES):
+        tool = tools[i % len(tools)]
+        args = _variant_args(tool, i)
+        obs = make_obs(cycle=10 + i, tool_calls=i % 9, confirm_ppl=_PPLS[i % len(_PPLS)])
+        raw = _dump({"tool": tool, "args": args})
+        prompt = render_tooler(_variant_request(tool, args, i), [], obs=obs, prefix=_PREFIXES[i % 3])
+        out.append(_pair("tooler", prompt, raw, kind="single", obs=obs))
+    return out
+
+
+def _episode_call(tool: str, i: int) -> tuple[str, str, dict[str, Any]]:
+    args = _variant_args(tool, i)
+    prefix = _PREFIXES[i % len(_PREFIXES)]
+    if tool == "list_files":
+        request = f"List the files under {args.get('path', prefix)}."
+    elif tool == "read_file":
+        request = f"Read {args['path']}."
+    elif tool == "grep_files":
+        request = f"Search for {args['pattern']!r}."
+    elif tool == "web_search":
+        request = f"Search the web for {args['query']!r}."
+    elif tool == "web_fetch":
+        request = f"Fetch {args['url']} into the sandbox."
+    elif tool == "read_skill":
+        request = f"Read the skill card {args['name']!r}."
+    elif tool == "list_skills":
+        request = "List the skill cards. Empty args."
+    elif tool == "read_episode":
+        request = f"Read episode {args['id']}."
+    elif tool == "list_episodes":
+        request = "List recent train episodes."
+    elif tool == "read_notebook":
+        request = "Read the notebook."
+    elif tool == "write_note":
+        request = "Append a note about the parent run."
+    elif tool == "list_jobs":
+        request = "List recent jobs."
+    elif tool == "read_train_log":
+        request = "Read the tail of the train log."
+    elif tool == "list_packs":
+        request = "List the newest packs."
+    elif tool == "read_pack":
+        request = "Read that pack."
+    elif tool == "sandbox_usage":
+        request = "Report sandbox usage. Empty args."
+    else:
+        request = _variant_request(tool, args, i)
+    return request, _dump({"tool": tool, "args": args}), args
+
+
+def _scaled_tooler_episodes() -> list[Example]:
+    """Episodes of length 2, 3, and 4. A slice also recovers from a refusal."""
+    out: list[Example] = []
+    for i in range(_N_TOOLER_EPISODES):
+        chain = _EPISODE_CHAINS[i % len(_EPISODE_CHAINS)]
+        obs = make_obs(cycle=10_000 + i, tool_calls=1 + (i % 4), confirm_ppl=_PPLS[i % len(_PPLS)])
+        prefix = _PREFIXES[i % len(_PREFIXES)]
+        messages: list[dict[str, str]] = []
+        transcript: list[Turn] = []
+        refuse = i % 5 == 0
+        for step, tool in enumerate(chain, start=1):
+            request, raw, _args = _episode_call(tool, i + step)
+            if refuse and step == len(chain):
+                bad = _dump({"tool": "write_pack", "args": {"pack": {}}})
+                transcript.append(
+                    _turn("tooler", bad, {"ok": False, "error": refusal_text("forbidden", "write_pack")}, step, tool="write_pack")
+                )
+                request = "That tool is not yours. " + request
+            prompt = render_tooler(request, transcript, obs=obs, prefix=prefix)
+            messages.append({"role": "user", "content": prompt})
+            messages.append({"role": "assistant", "content": raw})
+            transcript.append(
+                _turn("tooler", raw, {"ok": True, "tool": tool}, step, tool=tool)
+            )
+        out.append(Example(role="tooler", messages=messages, source="synthetic", kind="episode", obs=obs))
+    return out
+
+
+def _scaled_thinker() -> list[Example]:
+    """Several hundred native thinker rows. Each prompt has its own cycle."""
+    out: list[Example] = []
+    for i in range(_N_THINKER):
+        hint = VARIANT_HINTS[i % len(VARIANT_HINTS)]
+        obs = make_obs(cycle=20_000 + i, tool_calls=i % 8, confirm_ppl=_PPLS[i % len(_PPLS)])
+        pack, claim, knob = _scaled_pack(obs, hint, i)
+        hyp = _hyp(claim)
+        packed = _dump(
+            {
+                "thought": f"Test the {hint} angle with one pack.",
+                "hypotheses": [hyp],
+                "need": None,
+                "pack": pack,
+                "done": False,
+            }
+        )
+        slot = i % 6
+        if slot == 1:
+            raw = _dump(
+                {
+                    "thought": "I need the episode card before I freeze a pack.",
+                    "hypotheses": [],
+                    "need": {"kind": "tool", "request": f"Read episode ep-{i % 40:04d} and report confirm_ppl."},
+                    "pack": None,
+                    "done": False,
+                }
+            )
+            prompt = render_thinker([], obs=obs, variant_hint=hint)
+            out.append(_pair("thinker", prompt, raw, kind="single", obs=obs))
+            continue
+        if slot == 2:
+            raw = _dump(
+                {
+                    "thought": "A short script should check that hidden divides by heads.",
+                    "hypotheses": [],
+                    "need": {
+                        "kind": "code",
+                        "request": "Print JSON with divisible true when hidden is divisible by heads.",
+                        "path": f"{_PREFIXES[i % 3]}/div_{i}.py",
+                    },
+                    "pack": None,
+                    "done": False,
+                }
+            )
+            prompt = render_thinker([], obs=obs, variant_hint=hint)
+            out.append(_pair("thinker", prompt, raw, kind="single", obs=obs))
+            continue
+        if slot == 3:
+            refused = _turn("harness", "", {"ok": False, "error": refusal_text("pack")}, 1)
+            prompt = render_thinker([refused], obs=obs, variant_hint=hint)
+            out.append(_pair("thinker", prompt, packed, kind="recovery", obs=obs, knob=knob, claim=claim))
+            continue
+        if slot == 4:
+            need = _dump(
+                {
+                    "thought": "I need one measurement before the pack.",
+                    "hypotheses": [],
+                    "need": {"kind": "tool", "request": f"Read episode ep-{i % 40:04d} and report confirm_ppl."},
+                    "pack": None,
+                    "done": False,
+                }
+            )
+            prompt_need = render_thinker([], obs=obs, variant_hint=hint)
+            prompt_pack = render_thinker(
+                [
+                    _turn(
+                        "thinker",
+                        need,
+                        {"need": {"kind": "tool"}, "pack": False, "hypotheses": 0, "done": False, "thought": "look up"},
+                        1,
+                    )
+                ],
+                obs=obs,
+                variant_hint=hint,
+            )
+            out.append(
+                Example(
+                    role="thinker",
+                    messages=[
+                        {"role": "user", "content": prompt_need},
+                        {"role": "assistant", "content": need},
+                        {"role": "user", "content": prompt_pack},
+                        {"role": "assistant", "content": packed},
+                    ],
+                    source="synthetic",
+                    kind="episode",
+                    obs=obs,
+                    knob=knob,
+                    claim=claim,
+                )
+            )
+            continue
+        if slot == 5:
+            done = _dump(
+                {
+                    "thought": "The pack is already in the transcript and I have nothing else to ask.",
+                    "hypotheses": [],
+                    "need": None,
+                    "pack": None,
+                    "done": True,
+                }
+            )
+            prior = _turn(
+                "thinker",
+                packed,
+                {"need": None, "pack": True, "hypotheses": 1, "done": False, "thought": "pack sent"},
+                1,
+                tool="pack",
+            )
+            prompt = render_thinker([prior], obs=obs, variant_hint=hint)
+            out.append(_pair("thinker", prompt, done, kind="single", obs=obs))
+            continue
+        prompt = render_thinker([], obs=obs, variant_hint=hint)
+        out.append(_pair("thinker", prompt, packed, kind="single", obs=obs, knob=knob, claim=claim))
+    return out
+
+
+def _scaled_pack(obs: dict[str, Any], hint: str, i: int) -> tuple[dict[str, Any], str, str | None]:
+    knob = knob_for_hint(hint)
+    value: Any = None
+    if hint == "learning rate":
+        text = _LR_TEXT[i % len(_LR_TEXT)]
+        value = float(text)
+        claim = f"lower config.lr -> {text} so the run should beat the parent"
+    elif hint == "training steps":
+        value = _STEPS[i % len(_STEPS)]
+        claim = f"raise config.steps -> {value} so the run trains longer than the parent"
+    elif hint == "batch size / sequence length":
+        value = _BATCH[i % len(_BATCH)]
+        claim = f"set config.batch -> {value} and leave sequence length alone"
+    elif hint.startswith("width"):
+        value = _HIDDEN[i % len(_HIDDEN)]
+        claim = f"set config.hidden -> {value}; weights will not resume from the parent"
+    elif hint == "data mix":
+        claim = _MIX_CLAIMS[i % len(_MIX_CLAIMS)]
+    else:
+        text = _LR_TEXT[i % len(_LR_TEXT)]
+        value = float(text)
+        claim = f"replicate the best episode and set config.lr -> {text}"
+    pack = pack_template(obs, claim, knob=knob)
+    config = dict(pack["config"])
+    if knob is not None and value is not None:
+        config[knob] = value
+    elif value is not None:
+        # Replicate has no single knob. The claim still names a learning rate.
+        config["lr"] = value
+    pack["config"] = config
+    if hint == "data mix":
+        pack["data_manifest"] = {"sources": list(_MIXES[i % len(_MIXES)])}
+    if knob == "hidden":
+        pack["parent_checkpoint"] = obs["subject_checkpoint"]
+    steps = config.get("steps")
+    pack["budgets"] = {"max_hours": 0.1, "max_steps": int(steps) if isinstance(steps, int) else 64}
+    return pack, claim, knob
 
 
 def generate(role: str) -> list[Example]:
     obs = make_obs()
     if role == "tooler":
         rows = _tooler_singles(obs) + _tooler_episodes(obs)
-        _attach_negatives(rows, _TOOL_NEGATIVES)
+        rows.extend(_scaled_tooler_singles())
+        rows.extend(_scaled_tooler_episodes())
+        rows = _dedup(rows)
+        _attach_negatives(rows, _TOOL_NEGATIVES, every=4)
         return rows
     if role == "thinker":
         rows = _thinker_examples(obs)
+        rows.extend(_scaled_thinker())
+        rows = _dedup(rows)
         # A pack whose lr is still the template placeholder.
         bad_pack = pack_template(obs, knob="lr")
-        _THINK = list(_THINK_NEGATIVES) + [
+        think_negatives = list(_THINK_NEGATIVES) + [
             _dump(
                 {
                     "thought": "left the slot in",
@@ -598,7 +1017,7 @@ def generate(role: str) -> list[Example]:
                 }
             )
         ]
-        _attach_negatives(rows, _THINK)
+        _attach_negatives(rows, think_negatives, every=2)
         return rows
     if role == "coder":
         rows = _coder_examples(obs)

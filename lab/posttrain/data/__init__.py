@@ -2,7 +2,10 @@
 
 SFT rows are TRL ``messages`` (``user`` = the harness prompt from
 ``thinker_prompt`` / ``tooler_prompt`` / ``coder_prompt``, ``assistant`` = the
-raw completion that role's parser accepts). DPO rows are TRL
+raw completion that role's parser accepts). Public function-calling rows keep
+their own tool list inside that same tooler template and are tagged
+``source=foreign_tools`` (``origin`` is the dataset id) so a trainer can mix
+them with native harness rows. DPO rows are TRL
 ``prompt`` / ``chosen`` / ``rejected`` strings. The harness calls
 ``backend.generate`` with that raw prompt and no chat template; point the
 trainer at these strings the same way, or the model trains on a different

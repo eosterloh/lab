@@ -1,102 +1,46 @@
 """Map public function-calling and code rows onto harness completions.
 
-A row is kept only when its function name (or, for code, its solution) can be
-turned into one call the role parser and arg checks accept. Everything else
-is counted and dropped. This module does not download anything.
+Function-calling rows (Glaive, Hermes, xLAM) keep their own tool names.
+Each one is rendered with ``tooler_prompt``, with that example's tool list
+in place of the harness catalog, and the assistant reply is
+``{"tool", "args"}``. Those rows are tagged ``source=foreign_tools`` and
+carry ``origin`` = the dataset id. Several calls in one example become
+sequential single-call turns. A row with no call is dropped.
+
+Code rows still have to be a script the coder parser and the sandbox accept.
+This module does not download anything.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 import json
 import re
-import shlex
 
+from lab.ensemble.protocol import Turn
 from lab.posttrain.data.examples import Example
-from lab.posttrain.data.harness import (
-    allowed_tooler_tools,
-    make_obs,
-    render_coder,
-    render_tooler,
-    schema_fields,
-)
-
-# Public names that mean the same harness tool. Anything else is unmapped.
-_TOOL_ALIASES = {
-    "read_file": "read_file",
-    "readfile": "read_file",
-    "cat_file": "read_file",
-    "cat": "read_file",
-    "list_files": "list_files",
-    "list_dir": "list_files",
-    "listdir": "list_files",
-    "ls": "list_files",
-    "grep": "grep_files",
-    "grep_files": "grep_files",
-    "search_files": "grep_files",
-    "regex_search": "grep_files",
-    "web_search": "web_search",
-    "websearch": "web_search",
-    "search_web": "web_search",
-    "duckduckgo": "web_search",
-    "duckduckgo_search": "web_search",
-    "web_fetch": "web_fetch",
-    "fetch_url": "web_fetch",
-    "http_get": "web_fetch",
-    "fetch": "web_fetch",
-    "write_file": "write_file",
-    "exec": "exec",
-    "shell": "exec",
-    "run_command": "exec",
-    "run_python": "run_python",
-    "write_and_run": "write_and_run",
-    "prefetch_data": "prefetch_data",
-    "data_stats": "data_stats",
-    "read_notebook": "read_notebook",
-    "write_note": "write_note",
-    "write_beliefs": "write_beliefs",
-    "list_episodes": "list_episodes",
-    "read_episode": "read_episode",
-    "read_skill": "read_skill",
-    "list_skills": "list_skills",
-    "list_jobs": "list_jobs",
-    "read_train_log": "read_train_log",
-    "sandbox_usage": "sandbox_usage",
-    "list_models": "list_models",
-    "inspect_model": "inspect_model",
-    "read_hypothesis": "read_hypothesis",
-    "list_hypotheses": "list_hypotheses",
-    "list_packs": "list_packs",
-    "read_pack": "read_pack",
-    "diff_packs": "diff_packs",
-    "read_trace": "read_trace",
-    "read_checkpoint_meta": "read_checkpoint_meta",
-    "read_episode_metrics": "read_episode_metrics",
-}
-
-# Public argument names -> harness argument, applied only when the harness
-# field is in the schema and not already set.
-_ARG_FROM = {
-    "path": ("filepath", "file_path", "filename", "file", "dir", "directory", "folder", "dest"),
-    "pattern": ("regex", "regexp", "pattern"),
-    "query": ("q", "search", "search_query", "query"),
-    "url": ("uri", "link", "href", "url"),
-    "argv": ("command", "cmd", "argv"),
-    "text": ("note", "text", "message"),
-    "content": ("code", "script", "source", "content"),
-    "n": ("limit", "count", "num", "n"),
-    "model_dir": ("model", "model_path", "model_dir"),
-    "pack_hash": ("hash", "pack_hash"),
-    "source": ("dataset", "hf_source", "source"),
-    "name": ("skill", "skill_name", "name"),
-    "id": ("episode_id", "episode", "id"),
-    "job_id": ("job", "job_id"),
-}
+from lab.posttrain.data.harness import make_obs, render_coder, render_tooler
 
 _TAG_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-_FN_CALL = re.compile(r"<functioncall>\s*(\{.*)", re.DOTALL | re.IGNORECASE)
-_ASSISTANT_JSON = re.compile(r"ASSISTANT:\s*(\{.*)", re.IGNORECASE | re.DOTALL)
+_FN_MARK = re.compile(r"<functioncall>\s*", re.IGNORECASE)
+_JSON_TYPES = {
+    "string": "str",
+    "str": "str",
+    "integer": "int",
+    "int": "int",
+    "number": "number",
+    "float": "number",
+    "boolean": "bool",
+    "bool": "bool",
+    "array": "list",
+    "list": "list",
+    "object": "object",
+    "dict": "object",
+}
+_INT_RE = re.compile(r"^-?\d+$")
+_DESC_MAX = 180
 
 
 def _loads_obj(raw: Any) -> dict[str, Any] | None:
@@ -126,12 +70,63 @@ def _loads_list(raw: Any) -> list[Any] | None:
     return None
 
 
-def _balanced_object(text: str) -> dict[str, Any] | None:
+def _repair_single_quoted_arguments(text: str) -> str:
+    """Glaive writes ``"arguments": '{...}'`` with single quotes around JSON.
+
+    That is not JSON. Lift the inner object out so ``json.loads`` can read the call.
+    """
+    mark = re.search(r'"arguments"\s*:\s*\'', text)
+    if mark is None:
+        return text
+    rest = text[mark.end() :]
+    if not rest.startswith("{"):
+        return text
+    _obj, end = _scan_object(rest, 0)
+    if end <= 0 or not rest[end:].startswith("'"):
+        return text
+    inner = rest[:end]
+    return text[: mark.start()] + '"arguments": ' + inner + rest[end + 1 :]
+
+
+def _object_after(text: str) -> dict[str, Any] | None:
     start = text.find("{")
     if start < 0:
         return None
+    obj, _end = _scan_object(text, start)
+    if obj is not None:
+        return obj
+    repaired = _repair_single_quoted_arguments(text[start:])
+    if repaired == text[start:]:
+        return None
+    obj, _end = _scan_object(repaired, 0)
+    return obj
+
+
+@dataclass
+class ForeignTool:
+    name: str
+    description: str
+    params: list[tuple[str, str, bool]]  # name, type, required
+
+
+def _scan_object(text: str, start: int) -> tuple[dict[str, Any] | None, int]:
+    """JSON object at ``start``, or None and the index just after this attempt."""
     depth = 0
-    for i, ch in enumerate(text[start:], start):
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
         if ch == "{":
             depth += 1
         elif ch == "}":
@@ -140,145 +135,387 @@ def _balanced_object(text: str) -> dict[str, Any] | None:
                 try:
                     data = json.loads(text[start : i + 1])
                 except json.JSONDecodeError:
-                    return None
-                return data if isinstance(data, dict) else None
-    return None
+                    return None, i + 1
+                return (data, i + 1) if isinstance(data, dict) else (None, i + 1)
+    return None, start + 1
+
+
+def _iter_objects(text: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        obj, end = _scan_object(text, i)
+        if obj is not None:
+            out.append(obj)
+        i = end if end > i else i + 1
+    return out
 
 
 def extract_calls(text: str) -> list[dict[str, Any]]:
-    """Function calls in Hermes ``<tool_call>`` or Glaive ``<functioncall>`` text."""
+    """Every function call in Hermes ``<tool_call>`` or Glaive ``<functioncall>`` text."""
     if not isinstance(text, str) or not text.strip():
         return []
     found: list[dict[str, Any]] = []
     for match in _TAG_CALL.finditer(text):
-        obj = _balanced_object(match.group(1))
+        obj = _object_after(match.group(1))
         if obj and (obj.get("name") or obj.get("tool")):
             found.append(obj)
     if found:
         return found
-    for cre in (_FN_CALL, _ASSISTANT_JSON):
-        match = cre.search(text)
-        if not match:
-            continue
-        obj = _balanced_object(match.group(1))
+    for match in _FN_MARK.finditer(text):
+        obj = _object_after(text[match.end() :])
         if obj and (obj.get("name") or obj.get("tool")):
-            return [obj]
-    return []
+            found.append(obj)
+    if found:
+        return found
+    for obj in _iter_objects(text):
+        if obj.get("name") or obj.get("tool"):
+            found.append(obj)
+    return found
 
 
-def _norm_tool(name: str) -> str | None:
-    key = re.sub(r"[^a-z0-9_]+", "_", name.strip().lower()).strip("_")
-    mapped = _TOOL_ALIASES.get(key)
-    if mapped is None or mapped not in allowed_tooler_tools():
+def _json_type(raw: Any) -> str:
+    if isinstance(raw, list):
+        for item in raw:
+            if item != "null":
+                return _json_type(item)
+        return "any"
+    if raw is None or not isinstance(raw, str):
+        return "any"
+    return _JSON_TYPES.get(raw.strip().lower(), "any")
+
+
+def _params_from(raw: Any) -> list[tuple[str, str, bool]]:
+    if isinstance(raw, str):
+        raw = _loads_obj(raw) or {}
+    if not isinstance(raw, dict):
+        return []
+    props = raw.get("properties")
+    if isinstance(props, dict):
+        req = raw.get("required")
+        if isinstance(req, bool):
+            required = {str(name) for name in props} if req else set()
+        elif isinstance(req, list):
+            required = {str(name) for name in req}
+        else:
+            required = set()
+        out: list[tuple[str, str, bool]] = []
+        for key, spec in props.items():
+            spec = spec if isinstance(spec, dict) else {}
+            out.append((str(key), _json_type(spec.get("type")), str(key) in required))
+        return out
+    out = []
+    for key, spec in raw.items():
+        if key in {"type", "required", "description", "$schema", "additionalProperties"}:
+            continue
+        if isinstance(spec, dict) and ("type" in spec or "properties" in spec or "description" in spec):
+            required = spec.get("required", True)
+            out.append((str(key), _json_type(spec.get("type")), bool(required) if isinstance(required, bool) else True))
+        elif isinstance(spec, str):
+            out.append((str(key), _json_type(spec), True))
+    return out
+
+
+def _tool_from_obj(obj: dict[str, Any]) -> ForeignTool | None:
+    body = obj
+    if obj.get("type") == "function" and isinstance(obj.get("function"), dict):
+        body = obj["function"]
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
         return None
-    return mapped
+    if "parameters" not in body and "params" not in body and "description" not in body and "properties" not in body:
+        # A bare {"name": "..."} still counts when that is all the row declared.
+        if set(body) - {"name", "type"} and "arguments" in body:
+            return None
+    desc = str(body.get("description") or "").strip().replace("\n", " ")
+    if len(desc) > _DESC_MAX:
+        desc = desc[: _DESC_MAX - 3] + "..."
+    params = _params_from(body.get("parameters") if "parameters" in body else body.get("params"))
+    return ForeignTool(name.strip(), desc, params)
 
 
-def _rename_args(tool: str, raw: dict[str, Any]) -> dict[str, Any]:
-    fields = {name: typ for name, typ, _req in schema_fields(tool)}
+def parse_tool_defs(raw: Any) -> list[ForeignTool]:
+    """Tool definitions from a Hermes/xLAM list or a Glaive system string."""
+    if isinstance(raw, list):
+        blobs: list[Any] = list(raw)
+    else:
+        blobs = _loads_list(raw) or []
+    tools: list[ForeignTool] = []
+    seen: set[str] = set()
+    if blobs:
+        for item in blobs:
+            obj = item if isinstance(item, dict) else _loads_obj(item)
+            if not isinstance(obj, dict):
+                continue
+            try:
+                tool = _tool_from_obj(obj)
+            except (TypeError, ValueError):
+                continue
+            if tool is None or tool.name in seen:
+                continue
+            seen.add(tool.name)
+            tools.append(tool)
+        return tools
+    if isinstance(raw, str):
+        for obj in _iter_objects(raw):
+            try:
+                tool = _tool_from_obj(obj)
+            except (TypeError, ValueError):
+                continue
+            if tool is None or tool.name in seen:
+                continue
+            seen.add(tool.name)
+            tools.append(tool)
+    return tools
+
+
+def _infer_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "object"
+    return "str"
+
+
+def _infer_tools(calls: list[tuple[str, dict[str, Any]]]) -> list[ForeignTool]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for name, args in calls:
+        if name not in grouped:
+            order.append(name)
+            grouped[name] = []
+        grouped[name].append(args)
+    tools: list[ForeignTool] = []
+    for name in order:
+        argsets = grouped[name]
+        keys: list[str] = []
+        for args in argsets:
+            for key in args:
+                if key not in keys:
+                    keys.append(key)
+        params: list[tuple[str, str, bool]] = []
+        for key in keys:
+            present = [args[key] for args in argsets if key in args and args[key] is not None]
+            required = len(present) == len(argsets)
+            params.append((key, _infer_type(present[0]) if present else "str", required))
+        tools.append(ForeignTool(name, "", params))
+    return tools
+
+
+def _merge_tools(declared: list[ForeignTool], calls: list[tuple[str, dict[str, Any]]]) -> list[ForeignTool]:
+    by = {tool.name: tool for tool in declared}
+    order = [tool.name for tool in declared]
+    for tool in _infer_tools(calls):
+        if tool.name not in by:
+            by[tool.name] = tool
+            order.append(tool.name)
+    return [by[name] for name in order]
+
+
+def _call_parts(call: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    name = str(call.get("name") or call.get("tool") or "").strip()
+    if not name:
+        return None
+    raw = call.get("arguments", call.get("args"))
+    if raw in (None, "", [], {}):
+        return name, {}
+    parsed = _loads_obj(raw)
+    if isinstance(parsed, str):
+        parsed = _loads_obj(parsed)
+    if parsed is None:
+        return None
+    return name, parsed
+
+
+def _coerce_value(value: Any, typ: str) -> Any:
+    if typ == "any":
+        return value
+    if typ == "str":
+        return value if isinstance(value, str) else None
+    if typ == "int":
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value == int(value):
+            return int(value)
+        if isinstance(value, str) and _INT_RE.match(value.strip()):
+            return int(value.strip())
+        return None
+    if typ == "number":
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+    if typ == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+            return value.strip().lower() == "true"
+        return None
+    if typ == "list":
+        return value if isinstance(value, list) else None
+    if typ == "object":
+        return value if isinstance(value, dict) else None
+    return value
+
+
+def _coerce_args(args: dict[str, Any], tool: ForeignTool) -> dict[str, Any] | str:
     out: dict[str, Any] = {}
-    used: set[str] = set()
-    for canon, aliases in _ARG_FROM.items():
-        if canon not in fields:
+    for name, typ, required in tool.params:
+        if name not in args or args[name] is None:
+            if required:
+                return "missing_arg"
             continue
-        for alias in (canon, *aliases):
-            if alias in raw and alias not in used and raw[alias] is not None:
-                out[canon] = raw[alias]
-                used.add(alias)
-                break
-    for name in fields:
-        if name in raw and name not in out and raw[name] is not None:
-            out[name] = raw[name]
-    if tool == "exec" and isinstance(out.get("argv"), str):
-        try:
-            out["argv"] = shlex.split(out["argv"])
-        except ValueError:
-            pass
-    if tool == "exec" and isinstance(out.get("argv"), list):
-        out["argv"] = [str(x) for x in out["argv"]]
-    for name, typ in fields.items():
-        if name not in out:
-            continue
-        value = out[name]
-        if typ == "int" and isinstance(value, float) and value == int(value):
-            out[name] = int(value)
-        if typ == "int" and isinstance(value, str) and value.strip().isdigit():
-            out[name] = int(value.strip())
+        value = _coerce_value(args[name], typ)
+        if value is None:
+            return "bad_type"
+        if required and typ == "str" and isinstance(value, str) and not value.strip():
+            return "missing_arg"
+        out[name] = value
+    for key, value in args.items():
+        if key not in out and value is not None:
+            out[key] = value
     return out
 
 
-def _prefix_path(tool: str, args: dict[str, Any], prefix: str) -> dict[str, Any] | None:
-    if "path" not in args or not isinstance(args["path"], str):
-        return args
-    if tool in {"read_checkpoint_meta", "inspect_model"}:
-        return args
-    path = args["path"].strip()
-    if path.startswith("/") or path.startswith("~") or ".." in path.split("/"):
-        return None
-    while path.startswith("./"):
-        path = path[2:]
-    if path and path != prefix and not path.startswith(prefix + "/"):
-        path = f"{prefix}/{path}"
-    out = dict(args)
-    out["path"] = path
-    return out
+def _tool_meta(tools: list[ForeignTool]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "params": [{"name": name, "type": typ, "required": required} for name, typ, required in tool.params],
+        }
+        for tool in tools
+    ]
 
 
-def _call_example(query: str, tool: str, args: dict[str, Any], *, source: str, prefix: str) -> Example:
+def _catalog(tools: list[ForeignTool]) -> str:
+    lines: list[str] = []
+    for tool in tools:
+        args = ", ".join(
+            f"{name}{'?' if not required else ''}: {typ}" for name, typ, required in tool.params
+        )
+        line = f"{tool.name} {{{args}}}"
+        if tool.description:
+            line += f" — {tool.description}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _foreign_example(
+    steps: list[tuple[str, str, dict[str, Any]]],
+    tools: list[ForeignTool],
+    *,
+    origin: str,
+    prefix: str,
+) -> Example:
+    """One tooler conversation. Each step is one ``{"tool", "args"}`` turn."""
     obs = make_obs()
-    raw = json.dumps({"tool": tool, "args": args}, ensure_ascii=False)
-    prompt = render_tooler(query.strip() or f"Use {tool}.", [], obs=obs, prefix=prefix)
+    catalog = _catalog(tools)
+    messages: list[dict[str, str]] = []
+    transcript: list[Turn] = []
+    for i, (query, name, args) in enumerate(steps, start=1):
+        request = query.strip() or f"Call {name}."
+        if i > 1:
+            request = (
+                f"{request}\nThe previous call already ran. "
+                f"Fulfil the rest of the request with the next call, {name}, and nothing else."
+            )
+        raw = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
+        prompt = render_tooler(request, transcript, obs=obs, prefix=prefix, catalog=catalog)
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "assistant", "content": raw})
+        transcript.append(
+            Turn(
+                role="tooler",
+                prompt_chars=len(prompt),
+                raw=raw,
+                parsed_ok=True,
+                result={"ok": True, "tool": name},
+                ms=1.0,
+                round=i,
+                tool=name,
+            )
+        )
     return Example(
         role="tooler",
-        messages=[{"role": "user", "content": prompt}, {"role": "assistant", "content": raw}],
-        source=source,
-        kind="single",
+        messages=messages,
+        source="foreign_tools",
+        kind="episode" if len(steps) > 1 else "single",
         obs=obs,
+        meta={"origin": origin, "tools": _tool_meta(tools)},
     )
 
 
-def map_call(
-    query: str,
-    call: dict[str, Any],
+def _steps_from_calls(
+    groups: list[tuple[str, list[dict[str, Any]]]],
     *,
-    source: str,
-    prefix: str = "ens-1",
-    dropped: Counter | None = None,
+    declared: list[ForeignTool],
+    origin: str,
+    prefix: str,
+    dropped: Counter,
 ) -> Example | None:
-    """Map one public function call onto a tooler example, or count a drop."""
-    dropped = dropped if dropped is not None else Counter()
-    name = str(call.get("name") or call.get("tool") or "").strip()
-    tool = _norm_tool(name)
-    if tool is None:
-        if name in {"write_pack", "write_hypothesis", "halt", "enter_train", "queue_candidates"}:
-            dropped["forbidden_tool"] += 1
-        else:
-            dropped["unmapped_tool"] += 1
-        return None
-    raw_args = call.get("arguments", call.get("args", {}))
-    parsed = _loads_obj(raw_args)
-    if parsed is None:
-        if raw_args in ({}, None, "", []):
-            parsed = {}
-        else:
-            dropped["bad_type"] += 1
-            return None
-    args = _rename_args(tool, parsed)
-    prefixed = _prefix_path(tool, args, prefix)
-    if prefixed is None:
-        dropped["bad_path"] += 1
-        return None
-    return _call_example(query, tool, prefixed, source=source, prefix=prefix)
-
-
-def _one_call(calls: list[dict[str, Any]], dropped: Counter) -> dict[str, Any] | None:
-    if not calls:
+    """``groups`` is (user text, calls in the assistant span that follows it)."""
+    flat: list[tuple[str, str, dict[str, Any]]] = []
+    parsed_calls: list[tuple[str, dict[str, Any]]] = []
+    for query, calls in groups:
+        for call in calls:
+            parts = _call_parts(call)
+            if parts is None:
+                dropped["bad_type"] += 1
+                return None
+            parsed_calls.append(parts)
+            flat.append((query, parts[0], parts[1]))
+    if not flat:
         dropped["no_function_call"] += 1
         return None
-    if len(calls) != 1:
-        dropped["multiple_calls"] += 1
-        return None
-    return calls[0]
+    tools = _merge_tools(declared, [(name, args) for _q, name, args in flat])
+    by_name = {tool.name: tool for tool in tools}
+    coerced: list[tuple[str, str, dict[str, Any]]] = []
+    for query, name, args in flat:
+        tool = by_name.get(name)
+        if tool is None:
+            dropped["unknown_tool"] += 1
+            return None
+        checked = _coerce_args(args, tool)
+        if isinstance(checked, str):
+            dropped[checked] += 1
+            return None
+        coerced.append((query, name, checked))
+    return _foreign_example(coerced, tools, origin=origin, prefix=prefix)
+
+
+def _glaive_groups(chat: str) -> list[tuple[str, list[dict[str, Any]]]]:
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
+    parts = re.split(r"(?:<\|endoftext\|>\s*)?USER:\s*", chat, flags=re.IGNORECASE)
+    for part in parts:
+        if not part.strip():
+            continue
+        match = re.search(r"ASSISTANT:\s*(.*)$", part, flags=re.IGNORECASE | re.DOTALL)
+        if match is None:
+            continue
+        user = re.sub(r"<\|endoftext\|>", "", part[: match.start()]).strip()
+        calls = extract_calls(match.group(1))
+        if calls:
+            groups.append((user, calls))
+    return groups
 
 
 def convert_xlam_row(row: dict[str, Any], *, source: str, prefix: str, dropped: Counter) -> Example | None:
@@ -287,27 +524,35 @@ def convert_xlam_row(row: dict[str, Any], *, source: str, prefix: str, dropped: 
         dropped["no_function_call"] += 1
         return None
     calls = [c for c in answers if isinstance(c, dict)]
-    call = _one_call(calls, dropped)
-    if call is None:
-        return None
     query = str(row.get("query") or row.get("question") or "")
-    return map_call(query, call, source=source, prefix=prefix, dropped=dropped)
+    return _steps_from_calls(
+        [(query, calls)],
+        declared=parse_tool_defs(row.get("tools")),
+        origin=source,
+        prefix=prefix,
+        dropped=dropped,
+    )
 
 
 def convert_glaive_row(row: dict[str, Any], *, source: str, prefix: str, dropped: Counter) -> Example | None:
     chat = str(row.get("chat") or row.get("text") or "")
-    calls = extract_calls(chat)
-    call = _one_call(calls, dropped)
-    if call is None:
-        return None
-    query = ""
-    for match in re.finditer(r"USER:\s*(.*?)(?:<\|endoftext\|>|ASSISTANT:|$)", chat, re.DOTALL):
-        query = match.group(1).strip()
-    return map_call(query, call, source=source, prefix=prefix, dropped=dropped)
+    groups = _glaive_groups(chat)
+    if not groups:
+        # Some rows put the only call in ``chat`` without a USER/ASSISTANT split.
+        calls = extract_calls(chat)
+        if calls:
+            groups = [(str(row.get("query") or ""), calls)]
+    return _steps_from_calls(
+        groups,
+        declared=parse_tool_defs(row.get("system") or ""),
+        origin=source,
+        prefix=prefix,
+        dropped=dropped,
+    )
 
 
 def convert_hermes_row(row: dict[str, Any], *, source: str, prefix: str, dropped: Counter) -> list[Example]:
-    """One example per assistant turn that contains exactly one mapped call."""
+    """One example per conversation. Several calls become sequential turns."""
     conv = row.get("conversations") or row.get("conversation") or []
     if isinstance(conv, str):
         try:
@@ -319,8 +564,7 @@ def convert_hermes_row(row: dict[str, Any], *, source: str, prefix: str, dropped
         dropped["no_function_call"] += 1
         return []
     pending = ""
-    out: list[Example] = []
-    saw_call = False
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
     for turn in conv:
         if not isinstance(turn, dict):
             continue
@@ -332,18 +576,16 @@ def convert_hermes_row(row: dict[str, Any], *, source: str, prefix: str, dropped
         if who not in {"gpt", "assistant", "model"}:
             continue
         calls = extract_calls(value)
-        if not calls:
-            continue
-        saw_call = True
-        if len(calls) != 1:
-            dropped["multiple_calls"] += 1
-            continue
-        example = map_call(pending, calls[0], source=source, prefix=prefix, dropped=dropped)
-        if example is not None:
-            out.append(example)
-    if not saw_call:
-        dropped["no_function_call"] += 1
-    return out
+        if calls:
+            groups.append((pending, calls))
+    example = _steps_from_calls(
+        groups,
+        declared=parse_tool_defs(row.get("tools")),
+        origin=source,
+        prefix=prefix,
+        dropped=dropped,
+    )
+    return [example] if example else []
 
 
 def _indent(text: str, spaces: int) -> str:

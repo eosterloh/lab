@@ -40,6 +40,9 @@ class Example:
             "source": self.source,
             "kind": self.kind,
         }
+        origin = self.meta.get("origin")
+        if isinstance(origin, str) and origin:
+            row["origin"] = origin
         return row
 
     def dpo_row(self) -> dict[str, str] | None:

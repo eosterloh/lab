@@ -14,7 +14,12 @@ from lab.parse import parse_tool_call
 from lab.posttrain.data.build import build_role
 from lab.posttrain.data.convert import convert_row
 from lab.posttrain.data.examples import Example
-from lab.posttrain.data.harness import refusal_text, validate_coder_completion, validate_tool_completion
+from lab.posttrain.data.harness import (
+    refusal_text,
+    validate_coder_completion,
+    validate_foreign_completion,
+    validate_tool_completion,
+)
 from lab.posttrain.data.sources import SOURCES, source_by_fmt
 from lab.posttrain.data.synthetic import generate
 from lab.posttrain.data.validate import validate_completion, validate_example
@@ -63,42 +68,104 @@ def test_sources_record_licenses_and_skip_codealpaca() -> None:
     assert "OpenAI" in skipped.notes
 
 
-def test_xlam_fixture_maps_harness_tools_and_drops_the_rest() -> None:
+def _catalog_block(prompt: str) -> str:
+    start = prompt.index("tools:\n") + len("tools:\n")
+    end = prompt.index("\n\nobservation:")
+    return prompt[start:end]
+
+
+def test_public_function_calls_keep_their_own_tools() -> None:
     examples, dropped = _convert("xlam", "xlam.jsonl")
-    tools = []
+    assert dropped["no_function_call"] == 0
+    assert dropped["unmapped_tool"] == 0
+    assert dropped["multiple_calls"] == 0
+    assert len(examples) == 6
     for ex in examples:
-        parsed = parse_tool_call(ex.messages[-1]["content"])
-        assert parsed is not None
-        tools.append(parsed[0])
+        assert ex.source == "foreign_tools"
+        assert ex.meta["origin"] == "Salesforce/xlam-function-calling-60k"
+        assert ex.sft_row()["origin"] == "Salesforce/xlam-function-calling-60k"
         assert validate_example(ex) is None
         assert "You are the TOOLER" in ex.messages[0]["content"]
-    assert tools == ["read_file", "web_search"]
+        for message in ex.messages:
+            if message["role"] == "assistant":
+                assert parse_tool_call(message["content"]) is not None
+                assert message["content"].startswith('{"tool":')
+    names = [parse_tool_call(ex.messages[-1]["content"])[0] for ex in examples]
+    assert names == ["read_file", "get_weather", "list_files", "halt", "read_file", "web_search"]
     read_args = parse_tool_call(examples[0].messages[-1]["content"])[1]
-    assert read_args["path"] == "ens-1/notes.txt"
-    assert dropped["unmapped_tool"] == 1
-    assert dropped["multiple_calls"] == 1
-    assert dropped["forbidden_tool"] == 1
-    assert dropped["bad_path"] == 1
+    assert read_args["path"] == "notes.txt"
+    assert "read_file {path: str}" in _catalog_block(examples[0].messages[0]["content"])
+    assert "read_notebook" not in _catalog_block(examples[0].messages[0]["content"])
+    weather = parse_tool_call(examples[1].messages[-1]["content"])
+    assert weather == ("get_weather", {"city": "Paris"})
+    assert "get_weather" in _catalog_block(examples[1].messages[0]["content"])
+    episode = examples[2]
+    assert episode.kind == "episode"
+    assert len([m for m in episode.messages if m["role"] == "assistant"]) == 2
+    assert parse_tool_call(episode.messages[1]["content"])[0] == "read_file"
+    assert "The previous call already ran." in episode.messages[2]["content"]
+    both = _catalog_block(episode.messages[2]["content"])
+    assert "read_file" in both and "list_files" in both
+    assert parse_tool_call(examples[3].messages[-1]["content"])[0] == "halt"
+    escaped = parse_tool_call(examples[4].messages[-1]["content"])
+    assert escaped == ("read_file", {"filepath": "../secrets.txt"})
+    assert parse_tool_call(examples[5].messages[-1]["content"]) == ("web_search", {"q": "TinyStories"})
 
 
 def test_glaive_and_hermes_fixtures() -> None:
     glaive, gdrop = _convert("glaive", "glaive.jsonl")
-    assert len(glaive) == 2
+    assert len(glaive) == 3
     assert gdrop["no_function_call"] == 1
-    assert gdrop["unmapped_tool"] == 1
+    assert gdrop["unmapped_tool"] == 0
     names = [parse_tool_call(ex.messages[-1]["content"])[0] for ex in glaive]
-    assert names == ["read_file", "web_search"]
+    assert names == ["read_file", "web_search", "generate_password"]
     for ex in glaive:
-        assert validate_tool_completion(ex.messages[-1]["content"]) is None
+        assert ex.source == "foreign_tools"
+        assert ex.meta["origin"] == "glaiveai/glaive-function-calling-v2"
+        assert validate_example(ex) is None
+    password = parse_tool_call(glaive[-1].messages[-1]["content"])
+    assert password == ("generate_password", {"length": 12})
+    assert "generate_password {length: int}" in _catalog_block(glaive[-1].messages[0]["content"])
 
     hermes, hdrop = _convert("hermes", "hermes.jsonl")
-    assert [parse_tool_call(ex.messages[-1]["content"])[0] for ex in hermes] == ["web_search", "read_skill"]
-    assert hdrop["multiple_calls"] == 1
+    assert hdrop["multiple_calls"] == 0
     assert hdrop["no_function_call"] == 1
+    assert len(hermes) == 3
+    assert [parse_tool_call(ex.messages[-1]["content"])[0] for ex in hermes] == [
+        "web_search",
+        "list_files",
+        "read_skill",
+    ]
+    episode = hermes[1]
+    assert episode.kind == "episode"
+    assert [parse_tool_call(m["content"])[0] for m in episode.messages if m["role"] == "assistant"] == [
+        "read_file",
+        "list_files",
+    ]
     skill = parse_tool_call(hermes[-1].messages[-1]["content"])
-    assert skill == ("read_skill", {"name": "lab_harness"})
+    assert skill == ("read_skill", {"skill": "lab_harness"})
     for ex in hermes:
+        assert ex.source == "foreign_tools"
         assert validate_example(ex) is None
+
+    # Some public schemas put required: true on the parameters object.
+    loose = {
+        "system": (
+            '{"name": "ping", "parameters": {"type": "object", "properties": '
+            '{"host": {"type": "string"}}, "required": true}}'
+        ),
+        "chat": (
+            "USER: ping example.com\n"
+            "ASSISTANT: <functioncall> "
+            '{"name": "ping", "arguments": \'{"host": "example.com"}\'} <|endoftext|>'
+        ),
+    }
+    dropped: Counter = Counter()
+    fixed = convert_row("glaive", loose, source="glaiveai/glaive-function-calling-v2", prefix="ens-1", dropped=dropped)
+    assert dropped == Counter()
+    assert len(fixed) == 1
+    assert parse_tool_call(fixed[0].messages[-1]["content"]) == ("ping", {"host": "example.com"})
+    assert "ping {host: str}" in _catalog_block(fixed[0].messages[0]["content"])
 
 
 def test_mbpp_fixture_executes_and_drops_a_failing_check() -> None:
@@ -116,20 +183,36 @@ def test_mbpp_fixture_executes_and_drops_a_failing_check() -> None:
 
 
 def test_synthetic_positives_cover_recovery_and_fail_their_rejections() -> None:
+    made: dict[str, list] = {}
     for role, banner in (
         ("tooler", "You are the TOOLER"),
         ("thinker", "You are the THINKER"),
         ("coder", "You are the CODER"),
     ):
         rows = generate(role)
+        made[role] = rows
         kinds = {ex.kind for ex in rows}
         assert {"single", "recovery"} <= kinds
         assert any(banner in m["content"] for ex in rows for m in ex.messages if m["role"] == "user")
         for ex in rows:
+            assert ex.source == "synthetic"
             assert validate_example(ex, execute=(role == "coder")) is None
             if ex.rejected:
                 assert validate_completion(ex, ex.rejected, execute=False) is not None
-    tooler = generate("tooler")
+    tooler = made["tooler"]
+    thinker_rows = made["thinker"]
+    assert len(tooler) >= 2000
+    assert len(thinker_rows) >= 300
+    assert len({ex.prompt_hash() for ex in tooler}) == len(tooler)
+    assert len({ex.prompt_hash() for ex in thinker_rows}) == len(thinker_rows)
+    lengths = [
+        len([m for m in ex.messages if m["role"] == "assistant"])
+        for ex in tooler
+        if ex.kind == "episode"
+    ]
+    assert min(lengths) >= 2 and max(lengths) >= 4
+    assert sum(1 for ex in tooler if ex.rejected) >= 100
+    tooler = made["tooler"]
     episode = next(ex for ex in tooler if ex.kind == "episode")
     assert len([m for m in episode.messages if m["role"] == "assistant"]) >= 2
     blob = "\n".join(m["content"] for m in episode.messages if m["role"] == "user")
@@ -157,6 +240,12 @@ def test_arg_checks_reject_the_harness_failures() -> None:
     assert validate_tool_completion("nope") == "parse_failed"
     # The name/arguments alias is the parser's, and a canonical tool still has to type-check.
     assert validate_tool_completion('{"name": "read_file", "arguments": {"path": 1}}') == "bad_type"
+    foreign_tools = [
+        {"name": "get_weather", "params": [{"name": "city", "type": "str", "required": True}]}
+    ]
+    assert validate_foreign_completion('{"tool": "get_weather", "args": {"city": "Paris"}}', foreign_tools) is None
+    assert validate_foreign_completion('{"tool": "get_weather", "args": {}}', foreign_tools) == "missing_arg"
+    assert validate_foreign_completion('{"tool": "read_file", "args": {}}', foreign_tools) == "unknown_tool"
 
 
 def test_build_each_role_offline_holds_out_by_prompt_hash(tmp_path: Path) -> None:
@@ -171,6 +260,12 @@ def test_build_each_role_offline_holds_out_by_prompt_hash(tmp_path: Path) -> Non
         role = report["role"]
         assert report["sft"] > 0 and report["eval"] > 0 and report["dpo"] > 0
         assert report["dropped_total"] == 0
+        assert report["native"] == report["sft"] + report["eval"]
+        assert report["foreign_tools"] == 0
+        if role == "tooler":
+            assert report["native"] >= 2000
+        if role == "thinker":
+            assert report["native"] >= 300
         sft = out / f"{role}.sft.jsonl"
         ev = out / f"{role}.eval.jsonl"
         dpo = out / f"{role}.dpo.jsonl"
@@ -225,6 +320,7 @@ def test_format_report_lists_drop_reasons() -> None:
         }
     )
     assert "dropped: 3" in text
+    assert "native: 0" in text
     assert "multiple_calls: 1" in text
     assert "unmapped_tool: 2" in text
 

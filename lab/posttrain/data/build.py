@@ -20,7 +20,11 @@ FORMAT = {
     "sft": (
         "TRL messages. The user content is the harness prompt from thinker_prompt, "
         "tooler_prompt, or coder_prompt. The assistant content is the raw completion "
-        "that role's parser accepts. Extra keys role, source, and kind are metadata."
+        "that role's parser accepts. Extra keys role, source, and kind are metadata. "
+        "Public function-calling rows use source=foreign_tools and origin=<dataset id>, "
+        "with that example's own tool list swapped into tooler_prompt. Native rows use "
+        "the harness catalog and source=synthetic (or the code dataset id). Mix them "
+        "native-weighted, for example 70/30, or upweight native rows."
     ),
     "dpo": (
         "TRL prompt, chosen, and rejected strings. prompt is the harness prompt "
@@ -164,9 +168,17 @@ def build_role(
         kept = kept[:max_n]
     train, held = _split(kept)
 
-    by_source = Counter(ex.source for ex in train + held)
+    def _origin(example: Example) -> str:
+        origin = example.meta.get("origin")
+        if isinstance(origin, str) and origin:
+            return origin
+        return example.source
+
+    by_origin = Counter(_origin(ex) for ex in train + held)
     for row in source_rows:
-        row["rows_kept"] = int(by_source.get(row["id"], 0))
+        row["rows_kept"] = int(by_origin.get(row["id"], 0))
+    native = sum(1 for ex in train + held if ex.source != "foreign_tools")
+    foreign = sum(1 for ex in train + held if ex.source == "foreign_tools")
 
     sft_rows = [ex.sft_row() for ex in train]
     eval_rows = [ex.sft_row() for ex in held]
@@ -183,6 +195,9 @@ def build_role(
         "dpo": len(dpo_rows),
         "dropped": dict(dropped),
         "dropped_total": int(sum(dropped.values())),
+        "native": native,
+        "foreign_tools": foreign,
+        "by_origin": dict(by_origin),
         "sources": source_rows,
     }
     manifest = _merge_manifest(out_dir, role, role_report, files)
@@ -223,7 +238,13 @@ def _merge_manifest(
     counts = {}
     for name, rec in roles.items():
         if isinstance(rec, dict):
-            counts[name] = {"sft": rec.get("sft", 0), "eval": rec.get("eval", 0), "dpo": rec.get("dpo", 0)}
+            counts[name] = {
+                "sft": rec.get("sft", 0),
+                "eval": rec.get("eval", 0),
+                "dpo": rec.get("dpo", 0),
+                "native": rec.get("native", 0),
+                "foreign_tools": rec.get("foreign_tools", 0),
+            }
     manifest["counts"] = counts
     return manifest
 
@@ -234,6 +255,8 @@ def format_report(report: dict[str, Any]) -> str:
         f"sft: {report['sft']}",
         f"eval: {report['eval']}",
         f"dpo: {report['dpo']}",
+        f"native: {report.get('native', 0)}",
+        f"foreign_tools: {report.get('foreign_tools', 0)}",
         f"dropped: {report['dropped_total']}",
     ]
     for reason, count in sorted((report.get("dropped") or {}).items()):
